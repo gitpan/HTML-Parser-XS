@@ -1,3 +1,37 @@
+1999-11-18   Gisle Aas <gisle@aas.no>
+
+   Release 2.99_12
+
+   Implemented $p->attr_pos option.  This make attribute positions
+   within $origtext of the start tag be reported instead of the
+   attribute values.  The positions are reported as 4 numbers; end of
+   previous attr, start of this attr, start of attr value, and end of
+   attr.  This should make substr() manipulations of $origtext easy.
+
+   Implemented $p->unbroken_text option.  This make sure that
+   text segments are never broken and given back as separate text
+   callbacks.  It delays text callbacks until some other markup
+   has been recognized.
+
+   More English corrections by Michael A. Chase.
+
+   HTML::LinkExtor now recognize even more URI attributes as
+   suggested by Sean M. Burke <sburke@netadventure.net>
+
+   Completed marked sections support.  It is also now a compile
+   time decision if you want this supported or not.  The only
+   drawback by enabling it should be a possible parsing speed
+   reduction.  I have not measured this yet.
+
+   The keys for callbacks initialized in the constructor are now
+   suffixed with "_cb".
+
+   Renamed $p->pass_cbdata to $p->pass_self.
+
+   Added magic number to the p_state struct.
+
+
+
 1999-11-17   Gisle Aas <gisle@aas.no>
 
    Release 2.99_11
@@ -18,7 +52,7 @@
 
    Release 2.99_10
 
-   The mkhctype and mkpfunc scripts did use \z inside RE.  This
+   The mkhctype and mkpfunc scripts were using \z inside RE.  This
    did not work for perl5.004.  Replaced them with plain old
    dollar signs.
 
@@ -33,9 +67,9 @@
    Some more test suite patches for Win32 by Michael A. Chase
    <mchase@ix.netcom.com>
 
-   Implemented $p->strict_names() attribute.  By default we now
+   Implemented $p->strict_names attribute.  By default we now
    allow almost anything in tag and attribute names.  This is much
-   closer to the behaviour of some popular browsers.  This allow us
+   closer to the behaviour of some popular browsers.  This allows us
    to parse broken tags like this example from the LWP mailing list:
    <IMG ALIGN=MIDDLE SRC=newprevlstGr.gif ALT=[PREV LIST] BORDER=0>
 
@@ -51,7 +85,7 @@
    Make Parser.xs compile on perl5.004_05 too.
 
    New callback called 'default'.  This will be called for any
-   document text no other callback shows interest in.
+   document text no other callback shows an interest in.
 
    Patch by Michael A. Chase <mchase@ix.netcom.com> that should
    help clean up files for the test suite on Win32.
@@ -67,7 +101,7 @@
    New boolean attribute v2_compat.  This influences how attributes
    are reported for start tags.
 
-   HTML::Filter filters now process instructions too.
+   HTML::Filter now filters process instructions too.
 
    Faster HTML::LinkExtor by taking advantage of the new
    callback interface.  The module now also uses URI.pm (instead

@@ -25,12 +25,12 @@ parser by calling the $p->parse() or $p->parse_file() methods.
 
 require HTML::Parser;
 @ISA = qw(HTML::Parser);
-$VERSION = sprintf("%d.%02d", q$Revision: 1.22 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 1.26 $ =~ /(\d+)\.(\d+)/);
 
 use strict;
 use vars qw(%LINK_ELEMENT);
 
-# Elements that might contain links and the name of the link attribute(s)
+# Tags that might contain links and the link attribute name(s)
 %LINK_ELEMENT =
 (
  a       => 'href',
@@ -38,19 +38,24 @@ use vars qw(%LINK_ELEMENT);
  area    => 'href',
  base    => 'href',
  bgsound => 'src',
+ blockquote => 'cite',
  body    => 'background',
+ del     => 'cite',
  embed   => [qw(pluginspage src)],
  form    => 'action',
- frame   => 'src',
- iframe  => 'src',
+ frame   => [qw(src longdesc)],
+ iframe  => [qw(src longdesc)],
  ilayer  => 'background',
- img     => [qw(src lowsrc usemap)],
- input   => 'src',
+ img     => [qw(src lowsrc longdesc usemap)],
+ input   => [qw(src usemap)],
+ ins     => 'cite',
  isindex => 'action',
+ head    => 'profile',
  layer   => [qw(background src)],
 'link'   => 'href',
- object  => [qw(classid codebase data usemap)],
- script  => 'src',
+ object  => [qw(classid codebase data archive usemap)],
+'q'      => 'cite',
+ script  => [qw(src for)],
  table   => 'background',
  td      => 'background',
  th      => 'background',
@@ -78,8 +83,8 @@ non-link attributes are removed.
 sub new
 {
     my($class, $cb, $base) = @_;
-    my $self = $class->SUPER::new(start => \&_start_tag,
-				  pass_cbdata => 1,
+    my $self = $class->SUPER::new(start_cb => \&_start_tag,
+				  pass_self => 1,
 				 );
     $self->{extractlink_cb} = $cb;
     if ($base) {
