@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 2.17 1999/11/10 13:17:03 gisle Exp $
+/* $Id: Parser.xs,v 2.23 1999/11/15 14:21:37 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -9,6 +9,7 @@
 /* TODO:
  *   - direct method calls
  *   - accum flags (filter out what enters @accum)
+ *   - option that prevents text broken between callbacks
  *   - return partial text from literal mode
  *   - marked sections?
  *   - unicode support (whatever that means)
@@ -33,7 +34,6 @@ extern "C" {
 #endif
 
 #include "patchlevel.h"
-
 #if PATCHLEVEL <= 4 /* perl5.004 */
 
 #ifndef PL_sv_undef
@@ -55,37 +55,23 @@ newSVpvn(char *s, STRLEN len)
     return sv;
 }
 #endif
-
 #endif /* perl5.004 */
 
 
-/* This is used to classify "letters" that can make up an HTML identifier
- * (tagname or attribute name) after the first strict ALFA char.  In addition
- * to what is allowed according to the SGML reference syntax we allow "_"
- * and ":".   The underscore is known to be used in Netscape bookmarks.html
- * files.  MicroSoft Excel use ":" in their HTML exports:
- *
- *  <A HREF="..." ADD_DATE="940656492" LAST_VISIT="941139558" LAST_MODIFIED="940656487">
- *  <div id="TSOH499L_24029" align=center x:publishsource="Excel">
- *
- *  HTML 4.0.1 now allows this.
- */
-
-#define isHALPHA(c) (isALPHA(c) || (c) == '_' || (c) == ':')
-#define isHALNUM(c) (isALNUM(c) || (c) == '.' || (c) == '-' || (c) == ':')
-
+#include "hctype.h" /* isH...() macros */
 
 struct p_state {
   SV* buf;
   char* literal_mode;
 
   /* various boolean configuration attributes */
-  int strict_comment;
-  int decode_text_entities;
-  int keep_case;
-  int xml_mode;
-  int v2_compat;
-  int pass_cbdata;
+  bool strict_comment;
+  bool strict_names;
+  bool decode_text_entities;
+  bool keep_case;
+  bool xml_mode;
+  bool v2_compat;
+  bool pass_cbdata;
 
   SV* bool_attr_val;
   AV* accum;
@@ -101,6 +87,7 @@ struct p_state {
 typedef struct p_state PSTATE;
 
 
+static
 struct literal_tag {
   int len;
   char* str;
@@ -188,7 +175,6 @@ decode_entities(SV* sv, HV* entity2char)
       while (isALNUM(*s))
 	s++;
       if (ent_name != s && entity2char) {
-	/* XXX lookup ent_name */
 	SV** svp = hv_fetch(entity2char, ent_name, s - ent_name, 0);
 	if (svp)
 	  repl = SvPV(*svp, repl_len);
@@ -444,6 +430,7 @@ html_process(PSTATE* p_state,
   if (accum) {
     AV* av = newAV();
     av_push(av, newSVpv("PI", 2));
+    av_push(av, newSVpvn(pi_beg, pi_end - pi_beg));
     av_push(av, newSVpvn(beg, end - beg));
     av_push(accum, newRV_noinc((SV*)av));
     return;
@@ -626,7 +613,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* cbdata)
       s++;
       if (s < end && *s == '-') {
 	s++;
-	while (s < end && isSPACE(*s))
+	while (isHSPACE(*s))
 	  s++;
 	if (s < end && *s == '>') {
 	  s++;
@@ -656,7 +643,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 static char*
 html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 {
-  char *s = beg;
+  char *s = beg + 2;
 
   if (*s == '-') {
     /* comment? */
@@ -680,14 +667,14 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     AV* tokens = newAV();
     s++;
     /* declaration */
-    while (s < end && isHALNUM(*s))
+    while (s < end && isHNAME_CHAR(*s))
       s++;
     /* first word available */
-    av_push(tokens, newSVpv(beg, s - beg));
+    av_push(tokens, newSVpv(beg+2, s - beg));
 
-    while (s < end && isSPACE(*s)) {
+    while (s < end && isHSPACE(*s)) {
       s++;
-      while (s < end && isSPACE(*s))
+      while (s < end && isHSPACE(*s))
 	s++;
 
       if (s == end)
@@ -732,7 +719,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 	/* plain word */
 	char *word_beg = s;
 	s++;
-	while (s < end && !isSPACE(*s) && *s != '>')
+	while (s < end && isHNOT_SPACE_GT(*s))
 	  s++;
 	if (s == end)
 	  goto PREMATURE;
@@ -747,7 +734,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
       goto PREMATURE;
     if (*s == '>') {
       s++;
-      html_decl(p_state, tokens, beg, s-1, cbdata);
+      html_decl(p_state, tokens, beg+2, s-1, cbdata);
       SvREFCNT_dec(tokens);
       return s;
     }
@@ -775,24 +762,43 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
   SV* attr;
   int empty_tag = 0;  /* XML feature */
 
-  assert(beg[0] == '<' && isHALPHA(beg[1]) && end - beg > 2);
+  hctype_t tag_name_first, tag_name_char;
+  hctype_t attr_name_first, attr_name_char;
+
+  if (p_state->strict_names) {
+    tag_name_first = attr_name_first = HCTYPE_NAME_FIRST;
+    tag_name_char  = attr_name_char  = HCTYPE_NAME_CHAR;
+  }
+  else if (p_state->xml_mode) {
+    tag_name_first = tag_name_char = HCTYPE_NOT_SPACE_SLASH_GT;
+    attr_name_first = HCTYPE_NOT_SPACE_SLASH_GT;
+    attr_name_char  = HCTYPE_NOT_SPACE_EQ_SLASH_GT;
+  }
+  else {
+    tag_name_first = tag_name_char = HCTYPE_NOT_SPACE_GT;
+    attr_name_first = HCTYPE_NOT_SPACE_GT;
+    attr_name_char  = HCTYPE_NOT_SPACE_EQ_GT;
+  }
+
+
+  assert(beg[0] == '<' && isHNAME_FIRST(beg[1]) && end - beg > 2);
   s += 2;
 
-  while (s < end && isHALNUM(*s))
+  while (s < end && isHCTYPE(*s, tag_name_char))
     s++;
   tag_end = s;
-  while (s < end && isSPACE(*s))
+  while (isHSPACE(*s))
     s++;
   if (s == end)
     goto PREMATURE;
 
   tokens = newAV();
 
-  while (isHALPHA(*s)) {
+  while (isHCTYPE(*s, attr_name_first)) {
     /* attribute */
     char *attr_beg = s;
     s++;
-    while (s < end && isHALNUM(*s))
+    while (s < end && isHCTYPE(*s, attr_name_char))
       s++;
     if (s == end)
       goto PREMATURE;
@@ -802,7 +808,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
       sv_lower(attr);
     av_push(tokens, attr);
 
-    while (s < end && isSPACE(*s))
+    while (isHSPACE(*s))
       s++;
     if (s == end)
       goto PREMATURE;
@@ -810,7 +816,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     if (*s == '=') {
       /* with a value */
       s++;
-      while (s < end && isSPACE(*s))
+      while (isHSPACE(*s))
 	s++;
       if (s == end)
 	goto PREMATURE;
@@ -832,7 +838,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
       }
       else {
 	char *word_start = s;
-	while (s < end && !isSPACE(*s) && *s != '>') {
+	while (s < end && isHNOT_SPACE_GT(*s)) {
 	  if (p_state->xml_mode && *s == '/')
 	    break;
 	  s++;
@@ -843,7 +849,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 					entity2char));
       }
 
-      while (s < end && isSPACE(*s))
+      while (isHSPACE(*s))
 	s++;
       if (s == end)
 	goto PREMATURE;
@@ -909,32 +915,90 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
   return beg;
 }
 
+static char*
+html_parse_end(PSTATE* p_state, char *beg, char *end, SV* cbdata)
+{
+  char *s = beg+2;
+  hctype_t name_first, name_char;
 
+  if (p_state->strict_names) {
+    name_first = HCTYPE_NAME_FIRST;
+    name_char  = HCTYPE_NAME_CHAR;
+  }
+  else {
+    name_first = name_char = HCTYPE_NOT_SPACE_GT;
+  }
+
+  if (isHCTYPE(*s, name_first)) {
+    char *tag_start = s;
+    char *tag_end;
+    s++;
+    while (s < end && isHCTYPE(*s, name_char))
+      s++;
+    tag_end = s;
+    while (isHSPACE(*s))
+      s++;
+    if (s < end) {
+      if (*s == '>') {
+	s++;
+	/* a complete end tag has been recognized */
+	html_end(p_state, tag_start, tag_end, beg, s, cbdata);
+	return s;
+      }
+    }
+    else {
+      return beg;
+    }
+  }
+  return 0;
+}
+
+static char*
+html_parse_process(PSTATE* p_state, char *beg, char *end, SV* cbdata)
+{
+  char *s = beg + 2;
+  /* processing instruction */
+  char *pi_end;
+
+ FIND_PI_END:
+  while (s < end && *s != '>')
+    s++;
+  if (*s == '>') {
+    pi_end = s;
+    s++;
+
+    if (p_state->xml_mode) {
+      /* XML processing instructions are ended by "?>" */
+      if (s - beg < 4 || s[-2] != '?')
+	goto FIND_PI_END;
+      pi_end = s - 2;
+    }
+
+    /* a complete processing instruction seen */
+    html_process(p_state, beg+2, pi_end, beg, s, cbdata);
+    return s;
+  }
+  else {
+    return beg;
+  }
+  return 0;
+}
+
+static char*
+html_parse_null(PSTATE* p_state, char *beg, char *end, SV* cbdata)
+{
+  return 0;
+}
+
+#include "pfunc.h"  /* declares the html_parsefunc[] */
 
 static void
 html_parse(PSTATE* p_state,
 	   SV* chunk,
 	   SV* cbdata)
 {
-  char *s, *t, *end;
+  char *s, *t, *end, *new_pos;
   STRLEN len;
-
-#if 0
-  {
-    STRLEN len;
-    char *s;
-
-    printf("html_parse\n");
-    if (p_state->buf) {
-      s = SvPV(p_state->buf, len);
-      printf("  buf   = [%s]\n", s);
-    }
-    if (chunk && SvOK(chunk)) {
-      s = SvPV(chunk, len);
-      printf("  chunk = [%s]\n", s);
-    }
-  }
-#endif
 
   if (!chunk || !SvOK(chunk)) {
     /* EOF */
@@ -948,7 +1012,6 @@ html_parse(PSTATE* p_state,
     }
     return;
   }
-
 
   if (p_state->buf && SvOK(p_state->buf)) {
     sv_catsv(p_state->buf, chunk);
@@ -997,7 +1060,7 @@ html_parse(PSTATE* p_state,
 	if (!*l) {
 	  /* matched it all */
 	  char *end_tag = s;
-	  while (isSPACE(*s))
+	  while (isHSPACE(*s))
 	    s++;
 	  if (*s == '>') {
 	    s++;
@@ -1021,16 +1084,16 @@ html_parse(PSTATE* p_state,
       }
       else {
 	s--;
-	if (isSPACE(*s)) {
+	if (isHSPACE(*s)) {
 	  /* wait with white space at end */
-	  while (s >= t && isSPACE(*s))
+	  while (s >= t && isHSPACE(*s))
 	    s--;
 	}
 	else {
 	  /* might be a chopped up entities/words */
-	  while (s >= t && !isSPACE(*s))
+	  while (s >= t && !isHSPACE(*s))
 	    s--;
-	  while (s >= t && isSPACE(*s))
+	  while (s >= t && isHSPACE(*s))
 	    s--;
 	}
 	s++;
@@ -1042,90 +1105,21 @@ html_parse(PSTATE* p_state,
     if (end - s < 3)
       break;
 
-    /* next char is known to be '<' */
+    /* next char is known to be '<' and pointed to by 't' as well as 's' */
     s++;
 
-    if (isHALPHA(*s)) {
-      /* start tag */
-      char *new_pos = html_parse_start(p_state, t, end, cbdata);
+    if ( (new_pos = html_parsefunc[*s](p_state, t, end, cbdata))) {
       if (new_pos == t) {
-	s = t;
-	break;
-      }	
-      else if (new_pos)
-	t = s = new_pos;
-    }
-    else if (*s == '/') {
-      /* end tag */
-      s++;
-      if (isHALPHA(*s)) {
-	char *tag_start = s;
-	char *tag_end;
-	s++;
-	while (s < end && isHALNUM(*s))
-	  s++;
-	tag_end = s;
-	while (s < end && isSPACE(*s))
-	  s++;
-	if (s < end) {
-	  if (*s == '>') {
-	    s++;
-	    /* a complete end tag has been recognized */
-	    html_end(p_state, tag_start, tag_end, t, s, cbdata);
-	    t = s;
-	  }
-	}
-	else {
-	  s = t;
-	  break;  /* need to see more stuff */
-	}
-      }
-    }
-    else if (*s == '!') {
-      /* declaration or comment */
-      char *new_pos;
-      s++;
-      new_pos = html_parse_decl(p_state, s, end, cbdata);
-      if (new_pos == s) {
-	/* no progress, need more */
+	/* no progress, need more data to know what it is */
 	s = t;
 	break;
       }
-      else if (new_pos) {
-	t = s = new_pos;
-      }
-    }
-    else if (*s == '?') {
-      /* processing instruction */
-      char *pi_end;
-      s++;
-    FIND_PI_END:
-      while (s < end && *s != '>')
-	s++;
-      if (*s == '>') {
-	pi_end = s;
-	s++;
-
-	if (p_state->xml_mode) {
-	  /* XML processing instructions are ended by "?>" */
-	  if (s - t < 4 || s[-2] != '?')
-	    goto FIND_PI_END;
-	  pi_end = s - 2;
-	}
-
-	/* a complete processing instruction seen */
-	html_process(p_state, t+2, pi_end, t, s, cbdata);
-	t = s;
-      }
-      else {
-	/* need more */
-	s = t;
-	break;
-      }
+      t = s = new_pos;
     }
 
-    /* if we get out here thene this was not a conforming tag, so
-     * treat it is plain text.
+    /* if we get out here then this was not a conforming tag, so
+     * treat it is plain text at the top of the loop again (we
+     * have already skipped past the "<").
      */
   }
 
@@ -1228,21 +1222,23 @@ strict_comment(pstate,...)
 	PSTATE* pstate
     ALIAS:
 	HTML::Parser::strict_comment = 1
-	HTML::Parser::decode_text_entities = 2
-        HTML::Parser::keep_case = 3
-        HTML::Parser::xml_mode = 4
-	HTML::Parser::v2_compat = 5
-        HTML::Parser::pass_cbdata = 6
+	HTML::Parser::strict_names = 2
+	HTML::Parser::decode_text_entities = 3
+        HTML::Parser::keep_case = 4
+        HTML::Parser::xml_mode = 5
+	HTML::Parser::v2_compat = 6
+        HTML::Parser::pass_cbdata = 7
     PREINIT:
-	int *attr;
+	bool *attr;
     CODE:
         switch (ix) {
 	case 1: attr = &pstate->strict_comment;       break;
-	case 2: attr = &pstate->decode_text_entities; break;
-	case 3: attr = &pstate->keep_case;            break;
-	case 4: attr = &pstate->xml_mode;             break;
-	case 5: attr = &pstate->v2_compat;            break;
-	case 6: attr = &pstate->pass_cbdata;          break;
+	case 2: attr = &pstate->strict_names;         break;
+	case 3: attr = &pstate->decode_text_entities; break;
+	case 4: attr = &pstate->keep_case;            break;
+	case 5: attr = &pstate->xml_mode;             break;
+	case 6: attr = &pstate->v2_compat;            break;
+	case 7: attr = &pstate->pass_cbdata;          break;
 	default:
 	    croak("Unknown boolean attribute (%d)", ix);
         }
