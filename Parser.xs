@@ -1,6 +1,7 @@
-/* $Id: Parser.xs,v 2.43 1999/11/26 15:23:54 gisle Exp $
+/* $Id: Parser.xs,v 2.60 1999/11/30 21:50:43 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
+ * Copyright 1999, Michael A. Chase.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the same terms as Perl itself.
@@ -8,23 +9,16 @@
 
 /* TODO:
  *   - write test scritps
- *   - write documentation
- *   - callback parameter spec
+ *   - update/write documentation
  *   - pic attribute (">" or "?>" are defaults)
- *   - count chars, line numbers
  *   - utf8 mode (entities expand to utf8 chars)
- *   - option that make start tag attrs be returned as a hash
+ *   - count chars, line numbers
  *   - return partial text from literal/cdata mode
- *   - accum flags (filter out what enters @accum)
  *   - option to avoid attribute value decoding
- *
- * PLAIN BUGS:
- *   - unbroken_text does not handle cdata sections.
+ *   - unbroken_text option
  *
  * POSSIBLE OPTIMIZATIONS:
  *   - direct method calls
- *   - avoid building start tag tokens when start tags are
- *     ignored.
  *   - less need for leaving things in buf when unbroken_text
  *     option is enabled.
  *
@@ -74,7 +68,21 @@ newSVpvn(char *s, STRLEN len)
 
 #define P_MAGIC 0x16091964
 
+enum event_id {
+  E_DECLARATION = 0,
+  E_COMMENT,
+  E_START,
+  E_END,
+  E_TEXT,
+  E_PROCESS,
+  E_DEFAULT,
+  /**/
+  EVENT_COUNT,
+};
+typedef enum event_id event_id_t;
+
 #include "hctype.h" /* isH...() macros */
+#include "tokenpos.h"
 
 #ifdef MARKED_SECTION
 enum marked_section_t {
@@ -84,7 +92,20 @@ enum marked_section_t {
   MS_CDATA,
   MS_IGNORE,
 };
+
+#define CDATA_MODE(p_state) ((p_state)->literal_mode || \
+			     (p_state)->ms == MS_CDATA)
+
+#else
+
+#define CDATA_MODE(p_state) ((p_state)->literal_mode)
 #endif
+
+
+struct p_handler {
+  SV* cb;
+  SV* attrspec;
+};
 
 struct p_state {
   U32 magic;
@@ -95,13 +116,8 @@ struct p_state {
   /* various boolean configuration attributes */
   bool strict_comment;
   bool strict_names;
-  bool decode_text_entities;
-  bool keep_case;
   bool xml_mode;
-  bool v2_compat;
-  bool pass_self;
   bool unbroken_text;
-  bool attr_pos;
 
   /* special parsing modes */
   char* literal_mode;
@@ -115,16 +131,7 @@ struct p_state {
 
   /* various */
   SV* bool_attr_val;
-  AV* accum;
-
-  /* callbacks */
-  SV* text_cb;
-  SV* start_cb;
-  SV* end_cb;
-  SV* decl_cb;
-  SV* com_cb;
-  SV* pi_cb;
-  SV* default_cb;
+  struct p_handler handlers[EVENT_COUNT];
 };
 typedef struct p_state PSTATE;
 
@@ -143,7 +150,7 @@ literal_mode_elem[] =
   {0, 0}
 };
 
-static HV* entity2char;
+static HV* entity2char;  /* %HTML::Entities::entity2char */
 
 
 static SV*
@@ -155,6 +162,7 @@ sv_lower(SV* sv)
 	*s = toLOWER(*s);
    return sv;
 }
+
 
 static SV*
 decode_entities(SV* sv, HV* entity2char)
@@ -245,404 +253,298 @@ decode_entities(SV* sv, HV* entity2char)
   return sv;
 }
 
-static void
-html_default(PSTATE* p_state, char* beg, char *end, SV* self)
-{	
-  SV *cb = p_state->default_cb;
-  if (beg == end)
-    return;
-
-  if (cb) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-    
-  }
-}
 
 static void
-html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* self)
+html_handle(PSTATE* p_state,
+	    event_id_t event,
+	    char *beg, char *end,
+	    token_pos_t *tokens, int num_tokens,
+	    SV* self
+	    )
 {
-  AV *accum = p_state->accum;
-  SV *cb = p_state->text_cb;
+  struct p_handler *h = &p_state->handlers[event];
 
-  SV* text;
-
-  if (beg == end)
-    return;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  if (!accum && !cb) {
-    html_default(p_state, beg, end, self);
-    return;
-  }
-
-  if (p_state->unbroken_text) {
-    if (p_state->pending_text)
-      sv_catpvn(p_state->pending_text, beg, end - beg);
-    else
-      p_state->pending_text = newSVpvn(beg, end - beg);
-    return;
-  }
-
-  text = newSVpvn(beg, end - beg);
-  if (!cdata && p_state->decode_text_entities) {
-    decode_entities(text, entity2char);
-    cdata++;
-  }
-
-  if (accum) {
-    AV* av = newAV();
-    av_push(av, newSVpv("T", 1));
-    av_push(av, text);
-    if (cdata)
-      av_push(av, newSVsv(&PL_sv_yes));
-    av_push(accum, newRV_noinc((SV*)av));
-    return;
-  }
-
-  if (cb) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    XPUSHs(sv_2mortal(text));
-    XPUSHs(boolSV(cdata));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-  }
-}
-
-
-static void
-flush_pending_text(PSTATE* p_state, SV* self)
-{
-  char *s;
-  STRLEN len;
-  bool old_unbroken_text;
-
-  if (!p_state->pending_text)
-    return;
-  old_unbroken_text = p_state->unbroken_text;
-  p_state->unbroken_text = 0;
-  s = SvPV(p_state->pending_text, len);
-  html_text(p_state, s, s+len, 0, self);
-  SvREFCNT_dec(p_state->pending_text);
-  p_state->pending_text = 0;
-  p_state->unbroken_text = old_unbroken_text;
-  return;
-}
-
-
-static void
-html_end(PSTATE* p_state,
-	 char *tag_beg, char *tag_end,
-	 char *beg, char *end,
-	 SV* self)
-{
-  AV *accum;
-  SV *cb;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  flush_pending_text(p_state, self);
-
-  accum = p_state->accum;
-  if (accum) {
-    AV* av = newAV();
-    SV* tag = newSVpv(tag_beg, tag_end - tag_beg);
-    if (!p_state->keep_case && !p_state->xml_mode)
-      sv_lower(tag);
-    
-    av_push(av, newSVpv("E", 1));
-    av_push(av, tag);
-    av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, newRV_noinc((SV*)av));
-    return;
-  }
-
-  cb = p_state->end_cb;
-  if (cb) {
-    SV *sv;
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    sv = sv_2mortal(newSVpv(tag_beg, tag_end - tag_beg));
-    if (!p_state->keep_case && !p_state->xml_mode)
-      sv_lower(sv);
-    XPUSHs(sv);
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-    return;
-  }
-
-  html_default(p_state, beg, end, self);
-}
-
-
-static void
-html_start(PSTATE* p_state,
-	   char *tag_beg, char *tag_end,
-	   AV* tokens,
-	   int empty_tag,
-	   char *beg, char *end,
-	   SV* self)
-{
-  AV *accum = p_state->accum;
-  SV *cb = p_state->start_cb;
-
-  HV *attr;
-  AV *attr_seq;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  flush_pending_text(p_state, self);
-
-  if ((accum || cb) && p_state->v2_compat) {
-    /* need to construct an attr hash and an attr_seq array */
+  if (0) {
+    char *s = beg;
     int i;
-    int len = av_len(tokens);
-    attr = newHV();
-    attr_seq = newAV();
-    for (i = 0; i <= len; i += 2) {
-      SV** svp1 = av_fetch(tokens, i,   0);
-      SV** svp2 = av_fetch(tokens, i+1, 0);
-      if (svp1) {
-	av_push(attr_seq, SvREFCNT_inc(*svp1));
-	if (svp2)
-	  if (!hv_store_ent(attr, *svp1, SvREFCNT_inc(*svp2), 0))
-	    SvREFCNT_dec(*svp2);
+
+    /* print debug output */
+    switch(event) {
+    case E_DECLARATION: printf("DECLARATION"); break;
+    case E_COMMENT:     printf("COMMENT"); break;
+    case E_START:       printf("START"); break;
+    case E_END:         printf("END"); break;
+    case E_TEXT:        printf("TEXT"); break;
+    case E_PROCESS:     printf("PROCESS"); break;
+    default:            printf("EVENT #%d", event); break;
+    }
+
+    printf(" [");
+    while (s < end) {
+      if (*s == '\n') {
+	putchar('\\'); putchar('n');
+      }
+      else
+	putchar(*s);
+      s++;
+    }
+    printf("] %d\n", end - beg);
+    for (i = 0; i < num_tokens; i++) {
+      printf("  token %d: %d %d\n",
+	     i,
+	     tokens[i].beg - beg,
+	     tokens[i].end - tokens[i].beg);
+    }
+  }
+
+#ifdef MARKED_SECTION
+  if (p_state->ms == MS_IGNORE)
+    return;
+#endif
+
+  if (!h->cb || !SvOK(h->cb)) {
+    event = E_DEFAULT;
+    h = &p_state->handlers[E_DEFAULT];
+    if (!h->cb || !SvOK(h->cb))
+      return;
+  }
+
+  if (1) {
+    dSP;
+    STRLEN my_na;
+    char *attrspec = SvPV(h->attrspec, my_na);
+    char *s;
+
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+
+    for (s = attrspec; *s; s++) {
+      SV* arg = 0;
+      switch(*s) {
+      case 's':
+	arg = self;
+	break;
+
+      case 't':
+	/* tokens arrayref */
+	{
+	  AV* av = newAV();
+	  int i;
+	  for (i = 0; i < num_tokens; i++) {
+	    av_push(av, newSVpvn(tokens[i].beg, tokens[i].end-tokens[i].beg));
+	  }
+	  arg = newRV_noinc((SV*)av);
+	}
+	break;
+
+      case '#':
+	/* tokenpos arrayref */
+	{
+	  AV* av = newAV();
+	  int i;
+	  for (i = 0; i < num_tokens; i++) {
+	    av_push(av, newSViv(tokens[i].beg-beg));
+	    av_push(av, newSViv(tokens[i].end-tokens[i].beg));
+	  }
+	  arg = newRV_noinc((SV*)av);
+	}
+	break;
+
+      case '1':
+	/* token1 */
+	/* fall through */
+      case 'n':
+	/* tagname */
+	if (num_tokens >= 1) {
+	  arg = sv_2mortal(newSVpvn(tokens[0].beg, tokens[0].end - tokens[0].beg));
+	  if (!p_state->xml_mode && *s == 'n')
+	    sv_lower(arg);
+	}
+	break;
+
+      case 'a':
+	/* attr_hashref */
+	if (event == E_START) {
+	  HV* hv = newHV();
+	  int i;
+	  for (i = 1; i < num_tokens; i += 2) {
+	    SV* attrname = newSVpvn(tokens[i].beg,
+				    tokens[i].end-tokens[i].beg);
+	    SV* attrval;
+	    if (p_state->bool_attr_val && tokens[i].beg == tokens[i+1].beg) {
+	      attrval = newSVsv(p_state->bool_attr_val);
+	    }
+	    else {
+	      char *beg = tokens[i+1].beg;
+	      STRLEN len = tokens[i+1].end - beg;
+	      if (*beg == '"' || *beg == '\'') {
+		beg++; len -= 2;
+	      }
+	      attrval = newSVpvn(beg, len);
+	      decode_entities(attrval, entity2char);
+	    }
+	    
+	    if (!p_state->xml_mode)
+	      sv_lower(attrname);
+	    hv_store_ent(hv, attrname, attrval, 0);
+	  }
+	  arg = newRV_noinc((SV*)hv);
+	}
+	break;
+
+      case 'A':
+	/* attrseq arrayref (v2 compatibility stuff) */
+	if (event == E_START) {
+	  AV* av = newAV();
+	  int i;
+	  for (i = 1; i < num_tokens; i += 2) {
+	    SV* attrname = newSVpvn(tokens[i].beg, tokens[i].end-tokens[i].beg);
+	    if (!p_state->xml_mode)
+	      sv_lower(attrname);
+	    av_push(av, attrname);
+	  }
+	  arg = newRV_noinc((SV*)av);
+	}
+	break;
+	
+      case 'd':
+	/* origtext, data */
+	arg = sv_2mortal(newSVpvn(beg, end - beg));
+	break;
+
+      case 'D':
+	/* decoded text */
+	if (event == E_TEXT) {
+	  arg = sv_2mortal(newSVpvn(beg, end - beg));
+	  if (!CDATA_MODE(p_state))
+	    decode_entities(arg, entity2char);
+	}
+	break;
+
+      case 'c':
+	/* cdata flag */
+	if (event == E_TEXT) {
+	  arg = boolSV(CDATA_MODE(p_state));
+	}
+	break;
+
+      case 'L':
+	/* literal */
+	{
+	  int len = s[1];
+	  arg = sv_2mortal(newSVpvn(s+2, len));
+	  s += len + 1;
+	}
+	break;
+
+      default:
+	arg = sv_2mortal(newSVpvn(s, 1));
+	break;
+      }
+
+      if (!arg)
+	arg = &PL_sv_undef;
+
+      XPUSHs(arg);
+    }
+
+    PUTBACK;
+
+    if (*attrspec == 's' && !SvROK(h->cb)) {
+      char *method = SvPV(h->cb, my_na);
+      perl_call_method(method, G_DISCARD | G_VOID);
+    }
+    else {
+      perl_call_sv(h->cb, G_DISCARD | G_VOID);
+    }
+
+    FREETMPS;
+    LEAVE;
+  }
+}
+
+
+static SV*
+attrspec_compile(SV* src)
+{
+  SV* attrspec = newSVpvn("", 0);
+  STRLEN len;
+  char *s = SvPV(src, len);
+  char *end = s + len;
+
+  static HV* names = 0;
+  if (!names) {
+    /* printf("Init attrspec names\n"); */
+    names = newHV();
+    hv_store(names, "self", 4,          newSVpvn("s", 1), 0);
+    hv_store(names, "tokens", 6,        newSVpvn("t", 1), 0);
+    hv_store(names, "token1", 6,        newSVpvn("1", 1), 0);
+    hv_store(names, "tokenpos", 8,      newSVpvn("#", 1), 0);
+    hv_store(names, "tagname", 7,       newSVpvn("n", 1), 0);
+    hv_store(names, "gi", 2,            newSVpvn("n", 1), 0);
+    hv_store(names, "attr", 4,          newSVpvn("a", 1), 0);
+    hv_store(names, "attrseq", 7,       newSVpvn("A", 1), 0);
+    hv_store(names, "origtext", 8,      newSVpvn("d", 1), 0);
+    hv_store(names, "decoded_text", 12, newSVpvn("D", 1), 0);
+    hv_store(names, "cdata_flag", 10,   newSVpvn("c", 1), 0);
+  }
+
+  while (isHSPACE(*s))
+    s++;
+  while (s < end) {
+    if (isHNAME_FIRST(*s)) {
+      char *name = s;
+      SV** svp;
+      s++;
+      while (isHNAME_CHAR(*s))
+	s++;
+
+      /* check identifier */
+      svp = hv_fetch(names, name, s - name, 0);
+      if (svp) {
+	sv_catsv(attrspec, *svp);
+      }
+      else {
+	*s = '\0';
+	croak("Unrecognized identifier %s in attrspec", name);
       }
     }
-  }
-
-  if (accum) {
-    AV* av = newAV();
-    SV* tag = newSVpv(tag_beg, tag_end - tag_beg);
-    if (!p_state->keep_case && !p_state->xml_mode)
-      sv_lower(tag);
-    
-    av_push(av, newSVpv("S", 1));
-    av_push(av, tag);
-    if (p_state->v2_compat) {
-      av_push(av, newRV_noinc((SV*)attr));
-      av_push(av, newRV_noinc((SV*)attr_seq));
+    else if (*s == '"' || *s == '\'') {
+      char *string_beg = s;
+      s++;
+      while (s < end && *s != *string_beg)
+	s++;
+      if (*s == *string_beg) {
+	/* literal */
+	int len = s - string_beg - 1;
+	if (len > 255)
+	  croak("Can't have literal strings longer than 255 chars in attrspec");
+	sv_catpvf(attrspec, "L%c", len);
+	sv_catpvn(attrspec, string_beg+1, len);
+	s++;
+      }
+      else {
+	croak("Unterminated literal string in attrspec");
+      }
     }
     else {
-      av_push(av, newRV_inc((SV*)tokens));
+      croak("Bad attrspec (%s)", s);
     }
-    av_push(av, newSVpv(beg, end - beg));
-    av_push(accum, newRV_noinc((SV*)av));
-  }
-  else if (cb) {
-    SV *sv;
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    sv = sv_2mortal(newSVpv(tag_beg, tag_end - tag_beg));
-    if (!p_state->keep_case && !p_state->xml_mode)
-      sv_lower(sv);
-    XPUSHs(sv);
-    if (p_state->v2_compat) {
-      XPUSHs(sv_2mortal(newRV_noinc((SV*)attr)));
-      XPUSHs(sv_2mortal(newRV_noinc((SV*)attr_seq)));
+
+    while (isHSPACE(*s))
+      s++;
+    if (s == end)
+      break;
+    if (*s != ',') {
+      croak("Missing comma separator in attrspec");
     }
-    else {
-      XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
-    }
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
+    s++;
+    while (isHSPACE(*s))
+      s++;
   }
-  else {
-    html_default(p_state, beg, end, self);
-    return;
-  }
-
-  if (empty_tag)
-    html_end(p_state, tag_beg, tag_end, tag_beg, tag_beg, self);
+  return attrspec;
 }
-
-
-static void
-html_process(PSTATE* p_state,
-	     char *pi_beg, char *pi_end,
-	     char *beg, char *end,
-	     SV* self)
-{
-  AV *accum;
-  SV *cb;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  flush_pending_text(p_state, self);
-
-  accum = p_state->accum;
-  if (accum) {
-    AV* av = newAV();
-    av_push(av, newSVpv("PI", 2));
-    av_push(av, newSVpvn(pi_beg, pi_end - pi_beg));
-    av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, newRV_noinc((SV*)av));
-    return;
-  }
-
-  cb = p_state->pi_cb;
-  if (cb) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    XPUSHs(sv_2mortal(newSVpvn(pi_beg, pi_end - pi_beg)));
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-    return;
-  }
-
-  html_default(p_state, beg, end, self);
-}
-
-
-static void
-html_comment(PSTATE* p_state, char *beg, char *end, SV* self)
-{
-  AV *accum;
-  SV *cb;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  flush_pending_text(p_state, self);
-
-  accum = p_state->accum;
-  if (accum) {
-    AV* av = newAV();
-    av_push(av, newSVpv("C", 1));
-    av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, newRV_noinc((SV*)av));
-    return;
-  }
-
-  cb = p_state->com_cb;
-  if (cb) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-  }
-}
-
-
-static void
-html_decl(PSTATE* p_state, AV* tokens, char *beg, char *end, SV* self)
-{
-  AV *accum;
-  SV *cb;
-
-#ifdef MARKED_SECTION
-  if (p_state->ms == MS_IGNORE)
-    return;
-#endif
-
-  flush_pending_text(p_state, self);
-
-  accum = p_state->accum;
-  if (accum) {
-    AV* av = newAV();
-    av_push(av, newSVpv("D", 1));
-    if (!p_state->v2_compat)
-      av_push(av, newRV_inc((SV*)tokens));
-    av_push(av, newSVpv(beg, end - beg));
-    av_push(accum, newRV_noinc((SV*)av));
-    return;
-  }
-
-  cb = p_state->decl_cb;
-  if (cb) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    if (p_state->pass_self)
-      XPUSHs(self);
-    if (!p_state->v2_compat)
-      XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
-    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
-    PUTBACK;
-
-    perl_call_sv(cb, G_DISCARD);
-
-    FREETMPS;
-    LEAVE;
-    return;
-  }
-
-  html_default(p_state, beg-2, end+1, self);
-}
-
 
 
 static char*
@@ -651,7 +553,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
   char *s = beg;
 
   if (p_state->strict_comment) {
-    AV* av = newAV();  /* used to collect comments until we seen them all */
+    dTOKENS(4);
     char *start_com = s;  /* also used to signal inside/outside */
 
     while (1) {
@@ -662,7 +564,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
 	s++;
 
       if (s == end) {
-	SvREFCNT_dec(av);
+	FREE_TOKENS;
 	return beg;
       }
 
@@ -670,30 +572,20 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
 	s++;
 	if (start_com)
 	  goto FIND_DASH_DASH;
-	
-	/* we are done recognizing all comments, make callbacks */
-	if (!p_state->accum && !p_state->com_cb)
-	    html_default(p_state, beg-4, s, self);
-	else {
-	  int i;
-	  int len = av_len(av);
-	  for (i = 0; i <= len; i++) {
-	    SV** svp = av_fetch(av, i, 0);
-	    if (svp) {
-	      STRLEN len;
-	      char *s = SvPV(*svp, len);
-	      html_comment(p_state, s, s+len, self);
-	    }
-	  }
-	}
 
-	SvREFCNT_dec(av);
+	/* we are done recognizing all comments, make callbacks */
+	html_handle(p_state, E_COMMENT,
+		    beg - 4, s,
+		    tokens, num_tokens,
+		    self);
+	FREE_TOKENS;
+
 	return s;
       }
 
       s++;
       if (s == end) {
-	SvREFCNT_dec(av);
+	FREE_TOKENS;
 	return beg;
       }
 
@@ -702,7 +594,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
 	s++;
 	/* do something */
 	if (start_com) {
-	  av_push(av, newSVpvn(start_com, s - start_com - 2));
+	  PUSH_TOKEN(start_com, s-2);
 	  start_com = 0;
 	}
 	else {
@@ -713,30 +605,28 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
   }
 
   else { /* non-strict comment */
-    char *end_com;
+    token_pos_t token_pos;
+    token_pos.beg = beg;
     /* try to locate /--\s*>/ which signals end-of-comment */
   LOCATE_END:
     while (s < end && *s != '-')
       s++;
-    end_com = s;
+    token_pos.end = s;
     if (s < end) {
       s++;
-      if (s < end && *s == '-') {
+      if (*s == '-') {
 	s++;
 	while (isHSPACE(*s))
 	  s++;
-	if (s < end && *s == '>') {
+	if (*s == '>') {
 	  s++;
 	  /* yup */
-	  if (!p_state->accum && !p_state->com_cb)
-	    html_default(p_state, beg-4, s, self);
-	  else
-	    html_comment(p_state, beg, end_com, self);
+	  html_handle(p_state, E_COMMENT, beg-4, s, &token_pos, 1, self);
 	  return s;
 	}
       }
       if (s < end) {
-	s = end_com + 2;
+	s = token_pos.end + 2;
 	goto LOCATE_END;
       }
     }
@@ -747,6 +637,7 @@ html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* self)
 
   return 0;
 }
+
 
 #ifdef MARKED_SECTION
 
@@ -873,6 +764,7 @@ html_parse_marked_section(PSTATE* p_state, char *beg, char *end, SV* self)
 }
 #endif
 
+
 static char*
 html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 {
@@ -908,22 +800,23 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 
   if (*s == '>') {
     /* make <!> into empty comment <SGML Handbook 36:32> */
+    token_pos_t empty;
+    empty.beg = s;
+    empty.end = s;
     s++;
-    if (!p_state->accum && !p_state->com_cb)
-      html_default(p_state, beg, s, self);
-    else
-      html_comment(p_state, s-1, s-1, self);
+    html_handle(p_state, E_COMMENT, beg, s, &empty, 1, self);
     return s;
   }
 
   if (isALPHA(*s)) {
-    AV* tokens = newAV();
+    dTOKENS(8);
+
     s++;
     /* declaration */
     while (s < end && isHNAME_CHAR(*s))
       s++;
     /* first word available */
-    av_push(tokens, newSVpv(beg+2, s - beg - 2));
+    PUSH_TOKEN(beg+2, s);
 
     while (s < end && isHSPACE(*s)) {
       s++;
@@ -941,7 +834,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 	if (s == end)
 	  goto PREMATURE;
 	s++;
-	av_push(tokens, newSVpv(str_beg, s - str_beg));
+	PUSH_TOKEN(str_beg, s);
       }
       else if (*s == '-') {
 	/* comment */
@@ -963,7 +856,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 	    goto PREMATURE;
 	  if (*s == '-') {
 	    s++;
-	    av_push(tokens, newSVpv(com_beg, s - com_beg));
+	    PUSH_TOKEN(com_beg, s);
 	    break;
 	  }
 	}
@@ -976,7 +869,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 	  s++;
 	if (s == end)
 	  goto PREMATURE;
-	av_push(tokens, newSVpv(word_beg, s - word_beg));
+	PUSH_TOKEN(word_beg, s);
       }
       else {
 	break;
@@ -987,17 +880,17 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
       goto PREMATURE;
     if (*s == '>') {
       s++;
-      html_decl(p_state, tokens, beg+2, s-1, self);
-      SvREFCNT_dec(tokens);
+      html_handle(p_state, E_DECLARATION, beg, s, tokens, num_tokens, self);
+      FREE_TOKENS;
       return s;
     }
 
   FAIL:
-    SvREFCNT_dec(tokens);
+    FREE_TOKENS;
     return 0;
 
   PREMATURE:
-    SvREFCNT_dec(tokens);
+    FREE_TOKENS;
     return beg;
 
   }
@@ -1005,60 +898,20 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
 }
 
 
-static SV*
-attr_val(PSTATE* p_state, char *tag_beg,
-         char *prev_end, char *attr_beg,
-	 char *val_beg, char *val_end,
-         bool quote)
-{
-  if (p_state->attr_pos) {
-    AV* av = newAV();
-    av_extend(av, 3);
-    av_push(av, newSViv(prev_end - tag_beg));
-    av_push(av, newSViv(attr_beg - tag_beg));
-    if (val_beg)
-      av_push(av, newSViv(val_beg - tag_beg));
-    else
-      av_push(av, newSVsv(&PL_sv_undef));
-    av_push(av, newSViv(val_end - tag_beg));
-    return newRV_noinc((SV*)av);
-  }
-  else if (val_beg) {
-    if (quote) {
-      val_beg++;
-      val_end--;
-    }
-    return decode_entities(newSVpvn(val_beg, val_end - val_beg), entity2char);
-  }
-  else {
-     if (p_state->bool_attr_val)
-        return newSVsv(p_state->bool_attr_val);
-     return newSVpvn(attr_beg, val_end - attr_beg);
-  }
-}
-
-
 static char*
 html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
 {
   char *s = beg;
-  char *tag_end;
-  char *prev_end;
-  AV* tokens = 0;
   SV* attr;
   int empty_tag = 0;  /* XML feature */
+  dTOKENS(16);
 
   hctype_t tag_name_first, tag_name_char;
   hctype_t attr_name_first, attr_name_char;
 
-  if (p_state->strict_names) {
+  if (p_state->strict_names || p_state->xml_mode) {
     tag_name_first = attr_name_first = HCTYPE_NAME_FIRST;
     tag_name_char  = attr_name_char  = HCTYPE_NAME_CHAR;
-  }
-  else if (p_state->xml_mode) {
-    tag_name_first = tag_name_char = HCTYPE_NOT_SPACE_SLASH_GT;
-    attr_name_first = HCTYPE_NOT_SPACE_SLASH_GT;
-    attr_name_char  = HCTYPE_NOT_SPACE_EQ_SLASH_GT;
   }
   else {
     tag_name_first = tag_name_char = HCTYPE_NOT_SPACE_GT;
@@ -1072,28 +925,25 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
 
   while (s < end && isHCTYPE(*s, tag_name_char))
     s++;
-  tag_end = s;
-  prev_end = tag_end;
+  PUSH_TOKEN(beg+1, s);  /* tagname */
+
   while (isHSPACE(*s))
     s++;
   if (s == end)
     goto PREMATURE;
 
-  tokens = newAV();
-
   while (isHCTYPE(*s, attr_name_first)) {
     /* attribute */
-    char *attr_beg = s;
+    char *attr_name_beg = s;
+    char *attr_name_end;
     s++;
     while (s < end && isHCTYPE(*s, attr_name_char))
       s++;
     if (s == end)
       goto PREMATURE;
 
-    attr = newSVpv(attr_beg, s - attr_beg);
-    if (!p_state->keep_case && !p_state->xml_mode)
-      sv_lower(attr);
-    av_push(tokens, attr);
+    attr_name_end = s;
+    PUSH_TOKEN(attr_name_beg, attr_name_end); /* attr name */
 
     while (isHSPACE(*s))
       s++;
@@ -1109,7 +959,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
 	goto PREMATURE;
       if (*s == '>') {
 	/* parse it similar to ="" */
-	av_push(tokens, attr_val(p_state, beg, prev_end, attr_beg, s, s, 0));
+	PUSH_TOKEN(s, s);
 	break;
       }
       if (*s == '"' || *s == '\'') {
@@ -1120,7 +970,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
 	if (s == end)
 	  goto PREMATURE;
 	s++;
-	av_push(tokens, attr_val(p_state, beg, prev_end, attr_beg, str_beg, s, 1));
+	PUSH_TOKEN(str_beg, s);
       }
       else {
 	char *word_start = s;
@@ -1131,19 +981,15 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
 	}
 	if (s == end)
 	  goto PREMATURE;
-	av_push(tokens, attr_val(p_state, beg, prev_end, attr_beg, word_start, s, 0));
+	PUSH_TOKEN(word_start, s);
       }
-      prev_end = s;
       while (isHSPACE(*s))
 	s++;
       if (s == end)
 	goto PREMATURE;
     }
     else {
-      char *attr_end = attr_beg + SvCUR(attr);
-      av_push(tokens, attr_val(p_state, beg, prev_end, attr_beg,
-			       0, attr_end, 0));
-      prev_end = attr_end;
+      PUSH_TOKEN(attr_name_beg, attr_name_end); /* boolean attr value */
     }
   }
 
@@ -1157,14 +1003,16 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
   if (*s == '>') {
     s++;
     /* done */
-    html_start(p_state, beg+1, tag_end, tokens, empty_tag, beg, s, self);
-    SvREFCNT_dec(tokens);
+    html_handle(p_state, E_START, beg, s, tokens, num_tokens, self);
+    if (empty_tag)
+      html_handle(p_state, E_END, beg, s, tokens, 1, self);
+    FREE_TOKENS;
 
     if (1) {
       /* find out if this start tag should put us into literal_mode
        */
       int i;
-      int tag_len = tag_end - beg - 1;
+      int tag_len = tokens[0].end - tokens[0].beg;
 
       for (i = 0; literal_mode_elem[i].len; i++) {
 	if (tag_len == literal_mode_elem[i].len) {
@@ -1192,13 +1040,14 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* self)
     return s;
   }
   
-  SvREFCNT_dec(tokens);
+  FREE_TOKENS;
   return 0;
 
  PREMATURE:
-  SvREFCNT_dec(tokens);
+  FREE_TOKENS;
   return beg;
 }
+
 
 static char*
 html_parse_end(PSTATE* p_state, char *beg, char *end, SV* self)
@@ -1215,19 +1064,19 @@ html_parse_end(PSTATE* p_state, char *beg, char *end, SV* self)
   }
 
   if (isHCTYPE(*s, name_first)) {
-    char *tag_start = s;
-    char *tag_end;
+    token_pos_t tagname;
+    tagname.beg = s;
     s++;
     while (s < end && isHCTYPE(*s, name_char))
       s++;
-    tag_end = s;
+    tagname.end = s;
     while (isHSPACE(*s))
       s++;
     if (s < end) {
       if (*s == '>') {
 	s++;
 	/* a complete end tag has been recognized */
-	html_end(p_state, tag_start, tag_end, beg, s, self);
+	html_handle(p_state, E_END, beg, s, &tagname, 1, self);
 	return s;
       }
     }
@@ -1238,29 +1087,31 @@ html_parse_end(PSTATE* p_state, char *beg, char *end, SV* self)
   return 0;
 }
 
+
 static char*
 html_parse_process(PSTATE* p_state, char *beg, char *end, SV* self)
 {
   char *s = beg + 2;
   /* processing instruction */
-  char *pi_end;
+  token_pos_t token_pos;
+  token_pos.beg = s;
 
  FIND_PI_END:
   while (s < end && *s != '>')
     s++;
   if (*s == '>') {
-    pi_end = s;
+    token_pos.end = s;
     s++;
 
     if (p_state->xml_mode) {
       /* XML processing instructions are ended by "?>" */
       if (s - beg < 4 || s[-2] != '?')
 	goto FIND_PI_END;
-      pi_end = s - 2;
+      token_pos.end = s - 2;
     }
 
     /* a complete processing instruction seen */
-    html_process(p_state, beg+2, pi_end, beg, s, self);
+    html_handle(p_state, E_PROCESS, beg, s, &token_pos, 1, self);
     return s;
   }
   else {
@@ -1269,13 +1120,16 @@ html_parse_process(PSTATE* p_state, char *beg, char *end, SV* self)
   return 0;
 }
 
+
 static char*
 html_parse_null(PSTATE* p_state, char *beg, char *end, SV* self)
 {
   return 0;
 }
 
+
 #include "pfunc.h"  /* declares the html_parsefunc[] */
+
 
 static void
 html_parse(PSTATE* p_state,
@@ -1291,8 +1145,8 @@ html_parse(PSTATE* p_state,
       /* flush it */
       STRLEN len;
       char *s = SvPV(p_state->buf, len);
-      html_text(p_state, s, s+len, 0, self);
-      flush_pending_text(p_state, self);
+      assert(len);
+      html_handle(p_state, E_TEXT, s, s+len, 0, 0, self);
       SvREFCNT_dec(p_state->buf);
       p_state->buf = 0;
     }
@@ -1345,14 +1199,17 @@ html_parse(PSTATE* p_state,
 
 	if (!*l) {
 	  /* matched it all */
-	  char *end_tag = s;
+	  token_pos_t end_token;
+	  end_token.beg = end_text + 1;
+	  end_token.end = s;
+
 	  while (isHSPACE(*s))
 	    s++;
 	  if (*s == '>') {
 	    s++;
-	    html_text(p_state, t, end_text, 1, self);
-	    html_end(p_state, end_text+2, end_tag,
-		     end_text, s, self);
+	    if (t != end_text)
+	      html_handle(p_state, E_TEXT, t, end_text, 0, 0, self);
+	    html_handle(p_state, E_END,  end_text, s, &end_token, 1, self);
 	    p_state->literal_mode = 0;
 	    t = s;
 	  }
@@ -1374,7 +1231,8 @@ html_parse(PSTATE* p_state,
 	    if (*s == '\n')
 	      s++;
 	    /* marked section end */
-	    html_text(p_state, t, end_text, (p_state->ms == MS_CDATA), self);
+	    if (t != end_text)
+	      html_handle(p_state, E_TEXT, t, end_text, 0, 0, self);
 	    t = s;
 	    SvREFCNT_dec(av_pop(p_state->ms_stack));
 	    marked_section_update(p_state);
@@ -1401,7 +1259,7 @@ html_parse(PSTATE* p_state,
 	    s++;
 	    if (*s == '\n')
 	      s++;
-	    html_text(p_state, t, end_text, 0, self);
+	    html_handle(p_state, E_TEXT, t, end_text, 0, 0, self);
 	    SvREFCNT_dec(av_pop(p_state->ms_stack));
 	    marked_section_update(p_state);    
 	    t = s;
@@ -1414,7 +1272,7 @@ html_parse(PSTATE* p_state,
     }
     if (s != t) {
       if (*s == '<') {
-	html_text(p_state, t, s, 0, self);
+	html_handle(p_state, E_TEXT, t, s, 0, 0, self);
 	t = s;
       }
       else {
@@ -1432,7 +1290,8 @@ html_parse(PSTATE* p_state,
 	    s--;
 	}
 	s++;
-	html_text(p_state, t, s, 0, self);
+	if (s != t)
+	  html_handle(p_state, E_TEXT, t, s, 0, 0, self);
 	break;
       }
     }
@@ -1480,7 +1339,6 @@ html_parse(PSTATE* p_state,
   }
   return;
 }
-
 
 
 static PSTATE*
@@ -1537,6 +1395,8 @@ _alloc_pstate(self)
 void
 DESTROY(pstate)
 	PSTATE* pstate
+    PREINIT:
+        int i;
     CODE:
 	SvREFCNT_dec(pstate->buf);
 	SvREFCNT_dec(pstate->pending_text);
@@ -1544,14 +1404,11 @@ DESTROY(pstate)
         SvREFCNT_dec(pstate->ms_stack);
 #endif
         SvREFCNT_dec(pstate->bool_attr_val);
-        SvREFCNT_dec(pstate->accum);
-	SvREFCNT_dec(pstate->text_cb);
-	SvREFCNT_dec(pstate->start_cb);
-	SvREFCNT_dec(pstate->end_cb);
-	SvREFCNT_dec(pstate->decl_cb);
-	SvREFCNT_dec(pstate->com_cb);
-	SvREFCNT_dec(pstate->pi_cb);
-	SvREFCNT_dec(pstate->default_cb);
+        for (i = 0; i < EVENT_COUNT; i++) {
+          SvREFCNT_dec(pstate->handlers[i].cb);
+          SvREFCNT_dec(pstate->handlers[i].attrspec);
+        }
+
 	Safefree(pstate);
 
 
@@ -1571,28 +1428,18 @@ strict_comment(pstate,...)
     ALIAS:
 	HTML::Parser::strict_comment = 1
 	HTML::Parser::strict_names = 2
-	HTML::Parser::decode_text_entities = 3
-        HTML::Parser::keep_case = 4
-        HTML::Parser::xml_mode = 5
-	HTML::Parser::v2_compat = 6
-        HTML::Parser::pass_self = 7
-	HTML::Parser::unbroken_text = 8
-        HTML::Parser::attr_pos = 9
-        HTML::Parser::marked_sections = 10
+        HTML::Parser::xml_mode = 3
+	HTML::Parser::unbroken_text = 4
+        HTML::Parser::marked_sections = 5
     PREINIT:
 	bool *attr;
     CODE:
         switch (ix) {
 	case  1: attr = &pstate->strict_comment;       break;
 	case  2: attr = &pstate->strict_names;         break;
-	case  3: attr = &pstate->decode_text_entities; break;
-	case  4: attr = &pstate->keep_case;            break;
-	case  5: attr = &pstate->xml_mode;             break;
-	case  6: attr = &pstate->v2_compat;            break;
-	case  7: attr = &pstate->pass_self;            break;
-	case  8: attr = &pstate->unbroken_text;        break;
-	case  9: attr = &pstate->attr_pos;             break;
-        case 10:
+	case  3: attr = &pstate->xml_mode;             break;
+	case  4: attr = &pstate->unbroken_text;        break;
+        case  5:
 #ifdef MARKED_SECTION
 		 attr = &pstate->marked_sections;      break;
 #else
@@ -1620,76 +1467,83 @@ bool_attr_value(pstate,...)
     OUTPUT:
 	RETVAL
 
-SV*
-accum(pstate,...)
-	PSTATE* pstate
-    CODE:
-        RETVAL = pstate->accum ? newRV_inc((SV*)pstate->accum)
-#if !(PATCHLEVEL == 4 && SUBVERSION == 5)
-			       : &PL_sv_undef;
-#else
-         /* For perl5.004_05 returning PL_sv_undef will terminate
-          * the program with the "Modification of a read-only value attempted"
-          * message if its reference count happen to be incremented.
-          * Returning a copy is then better.
-          */
-	                       : newSVsv(&PL_sv_undef);
-#endif
-        if (items > 1) {
-	    SV* aref = ST(1);
-            AV* av = (AV*)SvRV(aref);
-            if (!av || SvTYPE(av) != SVt_PVAV)
-		croak("accum argument is not an array reference");
-	    SvREFCNT_dec(pstate->accum);
-	    pstate->accum = av;
-	    (void)SvREFCNT_inc(pstate->accum);
-        }
-    OUTPUT:
-	RETVAL
-
 void
-callback(pstate, name_sv, cb)
+handler(pstate, name_sv,...)
 	PSTATE* pstate
 	SV* name_sv
-	SV* cb
     PREINIT:
 	STRLEN name_len;
 	char *name = SvPV(name_sv, name_len);
-	SV** svp = 0;
+        int event = -1;
+        struct p_handler *h;
     CODE:
 	switch (name_len) {
 	case 3:
 	    if (strEQ(name, "end"))
-		svp = &pstate->end_cb;
+	      event = E_END;
 	    break;
 	case 4:
 	    if (strEQ(name, "text"))
-		svp = &pstate->text_cb;
+	      event = E_TEXT;
 	    break;
 	case 5:
 	    if (strEQ(name, "start"))
-		svp = &pstate->start_cb;
+	      event = E_START;
 	    break;
 	case 7:
 	    if (strEQ(name, "comment"))
-		svp = &pstate->com_cb;
+	      event = E_COMMENT;
 	    if (strEQ(name, "process"))
-		svp = &pstate->pi_cb;
+	      event = E_PROCESS;
 	    if (strEQ(name, "default"))
-		svp = &pstate->default_cb;
+	      event = E_DEFAULT;
 	    break;
 	case 11:
 	    if (strEQ(name, "declaration"))
-		svp = &pstate->decl_cb;
+	      event = E_DECLARATION;
 	    break;
 	}
 
-	if (svp) {
-	    SvREFCNT_dec(*svp);
-	    *svp = SvOK(cb) ? SvREFCNT_inc(cb) : 0;
+        if (event < 0)
+	    croak("No %s handler", name);
+
+	h = &pstate->handlers[event];
+        ST(0) = h->cb;
+
+        /* update */
+        if (items == 3 && SvROK(ST(2))) {
+	  SV* sv = SvRV(ST(2));
+	  AV* av;
+	  SV** svp;
+
+	  if (SvTYPE(sv) != SVt_PVAV)
+	    croak("Handler argument reference to something else than an array");
+	  av = (AV*)sv;
+
+	  svp = av_fetch(av, 0, 0);
+	  if (svp) {
+	    SvREFCNT_dec(h->cb);
+	    h->cb = SvREFCNT_inc(*svp);
+	  }
+
+	  svp = av_fetch(av, 1, 0);
+	  if (svp) {
+	    SvREFCNT_dec(h->attrspec);
+	    h->attrspec = attrspec_compile(*svp);
+	  }
+
 	}
-	else
-	    croak("Can't access %s callback", name);
+        else if (items > 2) {
+	  SvREFCNT_dec(h->cb);
+	  h->cb = newSVsv(ST(2));
+
+	  if (items > 3) {
+	    SvREFCNT_dec(h->attrspec);
+	    h->attrspec = attrspec_compile(ST(3));
+	  }
+	}
+
+        XSRETURN(1);
 
 
 MODULE = HTML::Parser		PACKAGE = HTML::Entities

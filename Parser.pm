@@ -9,7 +9,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = 2.99_14;  # $Date: 1999/11/26 15:28:38 $
+$VERSION = 2.99_15;  # $Date: 1999/11/30 21:50:43 $
 
 require HTML::Entities;
 
@@ -22,37 +22,47 @@ sub new
     my $class = shift;
     my $self = bless {}, $class;
     _alloc_pstate($self);
-    if (@_) {
+    if (@_ > 1) {
 	my %cfg = @_;
 
 	if (my $h = delete $cfg{handlers}) {
 	    $h = {@$h} if ref($h) eq "ARRAY";
 	    while (my($event, $cb) = each %$h) {
-		$self->callback($event => $cb);
+		$self->handler($event => $cb);
 	    }
 	}
 
 	# In the end we try to assume plain attribute or callback
 	for (keys %cfg) {
-	    if (/^(\w+)_cb$/) {
-		$self->callback($1 => $cfg{$_});
+	    if (/^(\w+)_h$/) {
+		$self->handler($1 => $cfg{$_});
 	    }
 	    else {
 		$self->$_($cfg{$_});
 	    }
 	}
     }
-    else {
+    elsif (!$_[0] || $_[0] < 3) {
 	# Set up method callbacks for compatibility with HTML-Parser-2.xx
-	$self->pass_self(1);    # get back $self as first argument
-	$self->v2_compat(1);    # fix start parameters
+	$self->handler(text    => "text",    "self,origtext,cdata_flag");
+	$self->handler(end     => "end",     "self,tagname,origtext");
+	$self->handler(process => "process", "self,token1,origtext");
+	$self->handler(start   => "start",
+		                  "self,tagname,attr,attrseq,origtext");
 
-	$self->callback(text        => sub { shift->text(@_)});
-	$self->callback(end         => sub { shift->end(@_)});
-	$self->callback(comment     => sub { shift->comment(@_)});
-	$self->callback(declaration => sub { shift->declaration(@_)});
-	$self->callback(process     => sub { shift->process(@_)});
-	$self->callback(start       => sub { shift->start(@_)});
+	$self->handler(comment =>
+		       sub {
+			   my($self, $tokens) = @_;
+			   for (@$tokens) {
+			       $self->comment($_);
+			   }
+		       }, "self,tokens");
+
+	$self->handler(declaration =>
+		       sub {
+			   my $self = shift;
+			   $self->declaration(substr($_[0], 2, -1));
+		       }, "self,origtext");
     }
     $self;
 }
@@ -136,6 +146,9 @@ This is the new and still experimental XS based HTML::Parser.  It
 should be completely backwards compatible with HTML::Parser version
 2.2x, but has many new features.  This is currently an alpha release.
 The interface to the new features might still change.
+
+B<Warning: This manual page is not up to date.  Lot of the new stuff
+has changed recently.>
 
 =head1 DESCRIPTION
 
