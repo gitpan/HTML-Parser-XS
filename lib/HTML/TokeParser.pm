@@ -1,10 +1,10 @@
 package HTML::TokeParser;
 
-# $Id: TokeParser.pm,v 2.13 1999/12/02 11:33:39 gisle Exp $
+# $Id: TokeParser.pm,v 2.15 1999/12/03 12:58:29 gisle Exp $
 
 require HTML::Parser;
 @ISA=qw(HTML::Parser);
-$VERSION = sprintf("%d.%02d", q$Revision: 2.13 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 2.15 $ =~ /(\d+)\.(\d+)/);
 
 use strict;
 use Carp ();
@@ -23,18 +23,17 @@ sub new
 	$file = IO::File->new($file, "r") || return;
     }
     my $self = $class->SUPER::new(api_version => 3);
-    $self->{accum} = [];
-    my $push_accum = sub { my $self = shift; push(@{$self->{accum}}, [@_])};
-    $self->handler(start => $push_accum, "self,'S',tagname,attr,attrseq,origtext");
-    $self->handler(end => $push_accum, "self,'E',tagname,origtext");
-    $self->handler(text => $push_accum, "self,'T',origtext,cdata_flag");
-    $self->handler(process => $push_accum, "self,'PI',token1,origtext");
+    my $accum = $self->{accum} = [];
+    $self->handler(start =>   $accum, "'S',tagname,attr,attrseq,text");
+    $self->handler(end =>     $accum, "'E',tagname,text");
+    $self->handler(text =>    $accum, "'T',text,cdata_flag");
+    $self->handler(process => $accum, "'PI',token1,text");
 
-    # These two really need some special treatment like we do in v2 backward
-    # compatibility section of HTML::Parser.  If we are lucky we can get away
-    # with it.... XXX
-    $self->handler(comment => $push_accum, "self,'C',origtext");
-    $self->handler(declaration => $push_accum, "self,'D',origtext");
+    # XXX The following two are not strictly V2 compatible.  We used
+    # to return something that did not contain the "<!(--)?" and
+    # "(--)?>" markers.
+    $self->handler(comment => $accum, "'C',text");
+    $self->handler(declaration => $accum, "'D',text");
 
     $self->{textify} = {img => "alt", applet => "alt"};
     if (ref($file) eq "SCALAR") {
@@ -227,8 +226,8 @@ declaration, and "PI" for process instructions.  The rest of the array
 is the same as the arguments passed to the corresponding HTML::Parser
 callbacks (see L<HTML::Parser>).  Returned tokens look like this:
 
-  ["S",  $tag, %$attr, @$attrseq, $origtext]
-  ["E",  $tag, $origtext]
+  ["S",  $tag, %$attr, @$attrseq, $text]
+  ["E",  $tag, $text]
   ["T",  $text]
   ["C",  $text]
   ["D",  $text]
@@ -249,8 +248,8 @@ for $p->get_token above, but the type code (first element) is missing
 and the name of end tags are prefixed with "/".  This means that the
 tags returned look like this:
 
-  [$tag, %$attr, @$attrseq, $origtext]
-  ["/$tag", $origtext]
+  [$tag, %$attr, @$attrseq, $text]
+  ["/$tag", $text]
 
 =item $p->get_text( [$endtag] )
 
