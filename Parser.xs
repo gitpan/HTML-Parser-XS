@@ -1,9 +1,26 @@
-/* $Id: Parser.xs,v 1.16 1999/11/05 11:15:55 gisle Exp $
+/* $Id: Parser.xs,v 1.23 1999/11/05 22:04:56 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the same terms as Perl itself.
+ */
+
+/* TODO:
+ *   - direct method calls
+ *   - accum flags
+ *   - specify which value boolean attributes takes
+ *   - embed entity encode/decode
+ *   - return partial text from literal mode
+ *   - <plaintext> should not end with </plaintext>
+ *   - XML mode
+ *        - processing instructions ends with "?>" instead of ">"
+ *        - start tags might end with "/" which should mark them
+ *          as empty
+ *        - unicode characters in names
+ *        - allow ":" and "_" as first char of names
+ *   - marked sections?
+ *   - unicode support
  */
 
 #ifdef __cplusplus
@@ -26,13 +43,14 @@ extern "C" {
  *  <div id="TSOH499L_24029" align=center x:publishsource="Excel">
  */
 
+#define isHALPHA(c) (isALPHA(c) || (c) == '_' || (c) == ':')
 #define isHALNUM(c) (isALNUM(c) || (c) == '.' || (c) == '-' || (c) == ':')
 
 
 struct p_state {
   SV* buf;
+  char* literal_mode;
 
-  int xmp;
   int strict_comment;
   int keep_case;
   int pass_cbdata;
@@ -47,6 +65,20 @@ struct p_state {
   SV* pi_cb;
 };
 typedef struct p_state PSTATE;
+
+
+struct literal_tag {
+  int len;
+  char* str;
+}
+literal_mode_elem[] =
+{
+  {6, "script"},
+  {5, "style"},
+  {3, "xmp"},
+  {9, "plaintext"},
+  {0, 0}
+};
 
 
 static SV*
@@ -385,19 +417,16 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     if (*s == '>') {
       s++;
       html_decl(p_state, tokens, beg, s-1, cbdata);
-      if (tokens)
-	SvREFCNT_dec(tokens);
+      SvREFCNT_dec(tokens);
       return s;
     }
 
   ERROR:
-    if (tokens)
-      SvREFCNT_dec(tokens);
+    SvREFCNT_dec(tokens);
     return 0;
 
   PREMATURE:
-    if (tokens)
-      SvREFCNT_dec(tokens);
+    SvREFCNT_dec(tokens);
     return beg;
 
   } else if (*s == '-') {
@@ -417,7 +446,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 	while (1) {
 	  /* try to locate "--" */
 	FIND_DASH_DASH:
-	  // printf("find_dash_dash: [%s]\n", s);
+	  /* printf("find_dash_dash: [%s]\n", s); */
 	  while (s < end && *s != '-' && *s != '>')
 	    s++;
 
@@ -533,6 +562,8 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     s++;
     while (s < end && isHALNUM(*s))
       s++;
+    if (s == end)
+      goto PREMATURE;
 
     sv = newSVpv(attr_beg, s - attr_beg);
     if (!p_state->keep_case)
@@ -581,7 +612,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 	goto PREMATURE;
     }
     else {
-      av_push(tokens, &PL_sv_yes);
+      av_push(tokens, &PL_sv_yes);  /* XXX configurable? */
     }
   }
 
@@ -589,24 +620,45 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     s++;
     /* done */
     html_start(p_state, beg+1, tag_end, tokens, beg, s, cbdata);
-    if (tokens)
-      SvREFCNT_dec(tokens);
+    SvREFCNT_dec(tokens);
 
-    if (tag_end - beg == 4 &&
-	toLOWER(beg[1]) == 'x' &&
-	toLOWER(beg[2]) == 'm' &&
-	toLOWER(beg[3]) == 'p')
-      p_state->xmp++;
+    if (1) {
+      /* find out if this start tag should put us into literal_mode
+       */
+      int i;
+      int tag_len = tag_end - beg - 1;
+
+      for (i = 0; literal_mode_elem[i].len; i++) {
+	if (tag_len == literal_mode_elem[i].len) {
+	  /* try to match it */
+	  char *s = beg + 1;
+	  char *t = literal_mode_elem[i].str;
+	  int len = tag_len;
+	  while (len) {
+	    if (toLOWER(*s) != *t)
+	      break;
+	    s++;
+	    t++;
+	    if (!--len) {
+	      /* found it */
+	      p_state->literal_mode = literal_mode_elem[i].str;
+	      /* printf("Found %s\n", p_state->literal_mode); */
+	      goto END_OF_LITERAL_SEARCH;
+	    }
+	  }
+	}
+      }
+    END_OF_LITERAL_SEARCH:
+    }
 
     return s;
   }
-  if (tokens)
-    SvREFCNT_dec(tokens);
+  
+  SvREFCNT_dec(tokens);
   return 0;
 
  PREMATURE:
-  if (tokens)
-    SvREFCNT_dec(tokens);
+  SvREFCNT_dec(tokens);
   return beg;
 }
 
@@ -639,7 +691,7 @@ html_parse(PSTATE* p_state,
 
   if (!chunk || !SvOK(chunk)) {
     /* EOF */
-    if (p_state->buf) {
+    if (p_state->buf && SvOK(p_state_buf)) {
       /* flush it */
       STRLEN len;
       char *s = SvPV(p_state->buf, len);
@@ -672,13 +724,17 @@ html_parse(PSTATE* p_state,
      * to where we started and the 's' is advanced as we go.
      */
 
-    while (p_state->xmp) {
+    while (p_state->literal_mode) {
+      char *l = p_state->literal_mode;
       char *end_text;
 
       while (s < end && *s != '<')
 	s++;
-      if (s == end)
+
+      if (s == end) {
+	s = t;
 	goto DONE;
+      }
 
       end_text = s;
       s++;
@@ -686,24 +742,23 @@ html_parse(PSTATE* p_state,
       /* here we rely on '\0' termination of perl svpv buffers */
       if (*s == '/') {
 	s++;
-	if (toLOWER(*s) == 'x') {
+	while (*l && *s == *l) {
 	  s++;
-	  if (toLOWER(*s) == 'm') {
+	  l++;
+	}
+
+	if (!*l) {
+	  /* matched it all */
+	  char *end_tag = s;
+	  while (isSPACE(*s))
 	    s++;
-	    if (toLOWER(*s) == 'p') {
-	      s++;
-	      while (isSPACE(*s))
-		s++;
-	      if (*s == '>') {
-		/* end */
-		s++;
-		html_text(p_state, t, end_text, 1, cbdata);
-		html_end(p_state, end_text+2, end_text+5,
-			          end_text, s, cbdata);
-		p_state->xmp = 0;
-		t = s;
-	      }
-	    }
+	  if (*s == '>') {
+	    s++;
+	    html_text(p_state, t, end_text, 1, cbdata);
+	    html_end(p_state, end_text+2, end_tag,
+		     end_text, s, cbdata);
+	    p_state->literal_mode = 0;
+	    t = s;
 	  }
 	}
       }
