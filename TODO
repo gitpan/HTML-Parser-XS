@@ -7,39 +7,41 @@ BEFORE 3.00
   - run more leak-tests
   - update README
 
-  - if only a single argument in argspec, then I think the stuff should
-    not be wrapped up in a array when event destination is an array.
 
 ISSUES
 
-  - no return value from handler()?
   - Should we rename 'process'?     (candidates: 'pi', 'proc',...)
-  - Should we rename 'cdata_flag'?  (candidates: 'is_cdata',...)
   - Should token0 go away? No!
   - Should we report tokens for 'text'?  If all you want is to know
     the length of a text segment, then 'tokenpos' could be used instead
     of asking for 'text' and then applying length($text).
-  - Something better than '' as the default argspec? No!
   - Should some '\n' be part of markup instead of text.  The SGML standard
     has a few things to say about this.  A '\n' following a start tag should
     be considered part of that tag.  A '\n' preceeding an end tag should
     be part of that tag and not part of the text flow. According to
-    '../html4.0.1/appendix/notes.html#h-B.3.1'
+    '../html4.0.1/appendix/notes.html#h-B.3.1'  Problematic when NL sometimes
+    is \r\n and sometimes just \r (from Mac servers)
+  - Should there be a way to get quotes into literal strings in argspec.
 
 
 FEATURES THAT CAN WAIT
 
+ - official interface to $self->{parse_file_stop}
+ - remove 255 char limit on literal strings in argspec
  - report 'line'
  - unbroken_text option
  - utf8 mode (where entities expand to utf8 chars instead of latin1 chars)
- - pic attribute (">" or "?>" are defaults)  useful where you want
-   to have "?>" as pic, but don't want the rest of xml_mode.  For instance
+ - pic attribute (">" or "?>" are defaults)  useful where you want to
+   have "?>" as pic, but don't want the rest of xml_mode. For instance
    to parse PHP files.
  - <![%app1;[...]]> (parameter entities)
- - $p->ignore("script", "style");
+ - $p->ignore_element("script", "style");
+ - $p->ignore_tag("font", "big", "small");
+ - "IGNORE" as handler destination (similar to $SIG{IGNORE}) might
+   be more efficient than 'sub {}'  Perhaps $p->handler(start => "");
 
 
-SGML FEATURES WE PROBABLY IGNORE FOREVER
+SGML FEATURES WE WILL PROBABLY IGNORE FOREVER
  - Empty tags: <> </>  (repeat previous start tag)
  - <foo<bar>  (same as <foo><bar>)
  - NET tags <name/.../
@@ -50,8 +52,7 @@ POSSIBLE OPTIMIZATIONS
  - run the profiler
 
 
-MINOR "BUGS" (alias FEATURES):
+MINOR "BUGS" (alias FEATURES)
  - no way to clear "boolean_attribute_value".
- - <plaintext> should not end with </plaintext>; can't be
-   escaped.
- - <style> and <script> does not end with the first "</".
+ - <plaintext> ends with </plaintext> and can't be escaped.
+ - <style> and <script> do not end with the first "</".

@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 2.74 1999/12/07 00:54:42 gisle Exp $
+/* $Id: Parser.xs,v 2.79 1999/12/08 17:27:36 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  * Copyright 1999, Michael A. Chase.
@@ -76,81 +76,17 @@ HV* entity2char;            /* %HTML::Entities::entity2char */
  */
 
 static SV*
-check_handler(char* name, SV* cb, SV* argspec, SV* self)
+check_handler(SV* h)
 {
-  SV *sv;
-  int type = SvTYPE(cb);
-  STRLEN my_na;
-
-  if (SvROK(cb)) {
-    sv = SvRV(cb);
-    type = SvTYPE(sv);
+  if (SvROK(h)) {
+    SV* ref = SvRV(h);
+    if (SvTYPE(ref) == SVt_PVCV)
+      return newSVsv(h);
+    if (SvTYPE(ref) == SVt_PVAV)
+      return SvREFCNT_inc(ref);
+    croak("Only code or array references allowed as handler");
   }
-  else
-    sv = cb;
-
-  switch (type) {
-  case SVt_NULL: /* undef */
-    {
-      sv = 0;
-    }
-    break;
-  case SVt_PVAV: /* Array */
-    {
-      /* use as is */
-      sv = SvREFCNT_inc(sv);
-    }
-    break;
-  case SVt_PVCV: /* Code Reference */
-    {
-      /* use original SV */
-      sv = SvREFCNT_inc(cb);
-    }
-    break;
-  case SVt_PV: /* String */
-    {
-      /* use original SV, see if it's a method in the current object */
-      char *attr_str = SvPV(argspec, my_na);
-      char *method = SvPV(sv, my_na);
-      sv = SvREFCNT_inc(sv);
-      if (*attr_str == 's') {
-	int i;
-	SV *val;
-	dSP;
-	ENTER;
-	SAVETMPS;
-	PUSHMARK(SP);
-	XPUSHs(self);
-	XPUSHs(sv);
-	PUTBACK;
-	i = perl_call_method("can", G_SCALAR);
-	SPAGAIN;
-	if (i)
-	  val = POPs;
-	PUTBACK;
-	FREETMPS;
-	LEAVE;
-	if (0) {
-	  printf(", $self->can(%s) return(%d,%d)", name, i, SvOK(val));
-	}
-	if (0) { /* MAC: the can() call isn't working for some reason */
-	if (!i || !SvOK(val))
-	  croak("Method '%s' not found for %s handler (%i)", method, name, i);
-	}
-	if (0) {
-	  printf(", saving Method name '%s'\n", method);
-	}
-      }
-    }
-    break;
-  default:
-    { /* Didn't match */
-      croak("Handler (%d) for %s is not a method, subroutine, or array ref",
-	    name, type);
-    }
-  }
-
-  return sv;
+  return SvOK(h) ? newSVsv(h) : 0;
 }
 
 
@@ -283,18 +219,18 @@ boolean_attribute_value(pstate,...)
     OUTPUT:
 	RETVAL
 
-void
-handler(pstate, name_sv,...)
+SV*
+handler(pstate, eventname,...)
 	PSTATE* pstate
-	SV* name_sv
+	SV* eventname
     PREINIT:
 	SV* self = ST(0);
 	STRLEN name_len;
-	char *name = SvPV(name_sv, name_len);
+	char *name = SvPV(eventname, name_len);
         int event = -1;
         int i;
         struct p_handler *h;
-    CODE:
+    PPCODE:
 	/* map event name string to event_id */
 	for (i = 0; i < EVENT_COUNT; i++) {
 	  if (strEQ(name, event_id_str[i])) {
@@ -303,41 +239,30 @@ handler(pstate, name_sv,...)
 	  }
 	}
         if (event < 0)
-	    croak("No %s handler", name);
+	    croak("No handler for %s events", name);
 
 	h = &pstate->handlers[event];
-        ST(0) = h->cb;
+
+	/* set up return value */
+	if (h->cb) {
+	  ST(0) = (SvTYPE(h->cb) == SVt_PVAV)
+	             ? sv_2mortal(newRV_inc(h->cb))
+	             : sv_2mortal(newSVsv(h->cb));
+	}
+        else {
+	  ST(0) = &PL_sv_undef;
+        }
 
         /* update */
-        if (items == 3 && SvROK(ST(2))) {
-	  SV* sv = SvRV(ST(2));
-	  AV* av;
-	  SV** svp;
-
-	  if (SvTYPE(sv) != SVt_PVAV)
-	    croak("Handler argument reference is not an array");
-	  av = (AV*)sv;
-
-	  svp = av_fetch(av, 1, 0);
-	  if (svp) {
+        if (items > 3) {
 	    SvREFCNT_dec(h->argspec);
-	    h->argspec = argspec_compile(*svp);
-	  }
-
-	  svp = av_fetch(av, 0, 0);
-	  if (svp) {
-	    SvREFCNT_dec(h->cb);
-	    h->cb = check_handler(name, *svp, h->argspec, self);
-	  }
-	}
-        else if (items > 2) {
-	  if (items > 3) {
-	    SvREFCNT_dec(h->argspec);
+	    h->argspec = 0;
 	    h->argspec = argspec_compile(ST(3));
-	  }
-
-	  SvREFCNT_dec(h->cb);
-	  h->cb = check_handler(name, ST(2), h->argspec, self);
+	}
+        if (items > 2) {
+	    SvREFCNT_dec(h->cb);
+            h->cb = 0;
+	    h->cb = check_handler(ST(2));
 	}
 
         XSRETURN(1);

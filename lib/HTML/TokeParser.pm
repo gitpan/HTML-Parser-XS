@@ -1,10 +1,10 @@
 package HTML::TokeParser;
 
-# $Id: TokeParser.pm,v 2.16 1999/12/05 21:09:00 gisle Exp $
+# $Id: TokeParser.pm,v 2.18 1999/12/08 19:46:54 gisle Exp $
 
 require HTML::Parser;
 @ISA=qw(HTML::Parser);
-$VERSION = sprintf("%d.%02d", q$Revision: 2.16 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 2.18 $ =~ /(\d+)\.(\d+)/);
 
 use strict;
 use Carp ();
@@ -26,7 +26,7 @@ sub new
     my $accum = $self->{accum} = [];
     $self->handler(start =>   $accum, "'S',tagname,attr,attrseq,text");
     $self->handler(end =>     $accum, "'E',tagname,text");
-    $self->handler(text =>    $accum, "'T',text,cdata_flag");
+    $self->handler(text =>    $accum, "'T',text,is_cdata");
     $self->handler(process => $accum, "'PI',token0,text");
 
     # XXX The following two are not strictly V2 compatible.  We used
@@ -188,8 +188,7 @@ The HTML::TokeParser is an alternative interface to the HTML::Parser class.
 It basically turns the HTML::Parser inside out.  You associate a file
 (or any IO::Handle object or string) with the parser at construction time and
 then repeatedly call $parser->get_token to obtain the tags and text
-found in the parsed document.  No need to make a subclass to make the
-parser do anything.
+found in the parsed document.
 
 Calling the methods defined by the HTML::Parser base class will be
 confusing, so don't do that.  Use the following methods instead:

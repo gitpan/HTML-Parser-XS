@@ -1,4 +1,4 @@
-/* $Id: hparser.c,v 2.17 1999/12/06 11:07:51 gisle Exp $
+/* $Id: hparser.c,v 2.23 1999/12/08 17:25:59 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -38,10 +38,12 @@ enum argcode {
   ARG_ATTRSEQ,
   ARG_TEXT,
   ARG_DTEXT,
-  ARG_CDATA_FLAG,
+  ARG_IS_CDATA,
   ARG_OFFSET,
+  ARG_LENGTH,
   ARG_EVENT,
   ARG_LITERAL,
+  ARG_UNDEF,
 };
 
 
@@ -138,7 +140,7 @@ report_event(PSTATE* p_state,
     PUSHMARK(SP);
   }
 
-  argspec = SvPV(h->argspec, my_na);
+  argspec = h->argspec ? SvPV(h->argspec, my_na) : "";
 
   for (s = argspec; *s; s++) {
     SV* arg = 0;
@@ -266,7 +268,7 @@ report_event(PSTATE* p_state,
       }
       break;
       
-    case ARG_CDATA_FLAG:
+    case ARG_IS_CDATA:
       if (event == E_TEXT) {
 	arg = boolSV(CDATA_MODE(p_state));
       }
@@ -274,6 +276,10 @@ report_event(PSTATE* p_state,
 
     case ARG_OFFSET:
       arg = sv_2mortal(newSViv(p_state->chunk_offset + offset));
+      break;
+
+    case ARG_LENGTH:
+      arg = sv_2mortal(newSViv(end - beg));
       break;
 
     case ARG_EVENT:
@@ -287,6 +293,10 @@ report_event(PSTATE* p_state,
 	arg = sv_2mortal(newSVpvn(s+2, len));
 	s += len + 1;
       }
+      break;
+
+    case ARG_UNDEF:
+      arg = &PL_sv_undef;
       break;
       
     default:
@@ -339,18 +349,20 @@ argspec_compile(SV* src)
   if (!names) {
     /* printf("Init argspec names\n"); */
     names = newHV();
-    hv_store(names, "self", 4,        newSViv(ARG_SELF),       0);
-    hv_store(names, "tokens", 6,      newSViv(ARG_TOKENS),     0);
-    hv_store(names, "tokenpos", 8,    newSViv(ARG_TOKENPOS),   0);
-    hv_store(names, "token0", 6,      newSViv(ARG_TOKEN0),     0);
-    hv_store(names, "tagname", 7,     newSViv(ARG_TAGNAME),    0);
-    hv_store(names, "attr", 4,        newSViv(ARG_ATTR),       0);
-    hv_store(names, "attrseq", 7,     newSViv(ARG_ATTRSEQ),    0);
-    hv_store(names, "text", 4,        newSViv(ARG_TEXT),       0);
-    hv_store(names, "dtext", 5,       newSViv(ARG_DTEXT),      0);
-    hv_store(names, "cdata_flag", 10, newSViv(ARG_CDATA_FLAG), 0);
-    hv_store(names, "offset", 6,      newSViv(ARG_OFFSET),     0);
-    hv_store(names, "event", 5,       newSViv(ARG_EVENT),      0);
+    hv_store(names, "self", 4,        newSViv(ARG_SELF),      0);
+    hv_store(names, "tokens", 6,      newSViv(ARG_TOKENS),    0);
+    hv_store(names, "tokenpos", 8,    newSViv(ARG_TOKENPOS),  0);
+    hv_store(names, "token0", 6,      newSViv(ARG_TOKEN0),    0);
+    hv_store(names, "tagname", 7,     newSViv(ARG_TAGNAME),   0);
+    hv_store(names, "attr", 4,        newSViv(ARG_ATTR),      0);
+    hv_store(names, "attrseq", 7,     newSViv(ARG_ATTRSEQ),   0);
+    hv_store(names, "text", 4,        newSViv(ARG_TEXT),      0);
+    hv_store(names, "dtext", 5,       newSViv(ARG_DTEXT),     0);
+    hv_store(names, "is_cdata", 8,    newSViv(ARG_IS_CDATA),  0);
+    hv_store(names, "offset", 6,      newSViv(ARG_OFFSET),    0);
+    hv_store(names, "length", 6,      newSViv(ARG_LENGTH),    0);
+    hv_store(names, "event", 5,       newSViv(ARG_EVENT),     0);
+    hv_store(names, "undef", 5,       newSViv(ARG_UNDEF),     0);
   }
 
   while (isHSPACE(*s))
@@ -875,7 +887,7 @@ parse_start(PSTATE* p_state, char *beg, char *end, STRLEN offset, SV* self)
 		   offset + (s - beg), self);
     FREE_TOKENS;
 
-    if (1) {
+    {
       /* find out if this start tag should put us into literal_mode
        */
       int i;
@@ -902,8 +914,8 @@ parse_start(PSTATE* p_state, char *beg, char *end, STRLEN offset, SV* self)
 	}
       }
     END_OF_LITERAL_SEARCH:
+      ;
     }
-
     return s;
   }
   
@@ -1070,7 +1082,7 @@ parse(PSTATE* p_state,
 	if (!*l) {
 	  /* matched it all */
 	  token_pos_t end_token;
-	  end_token.beg = end_text + 1;
+	  end_token.beg = end_text + 2;
 	  end_token.end = s;
 
 	  while (isHSPACE(*s))
