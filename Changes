@@ -1,3 +1,31 @@
+1999-11-09   Gisle Aas <gisle@aas.no>
+
+   Release 2.99_07
+
+   Entities in attribute values are now always expanded.
+
+   If you set the $p->decode_text_entities to a true value, then
+   you don't have to decode the text yourself.
+
+   In xml_mode we don't report empty element tags as a start tag
+   with an extra parameter any more.  Instead we generate an artificial
+   end tag.
+
+   'xml_mode' now implies 'keep_case'.
+
+   The parser now keeps its own copy of the bool_attr_value value.
+
+   Avoid memory leak for text callbacks
+
+   Avoid using ERROR as a goto label.
+
+   Introduced common internal accessor function for all boolean parser
+   attributes.
+
+   Tweaks to make Parser.xs compile under perl5.004.
+
+
+
 1999-11-08   Gisle Aas <gisle@aas.no>
 
    Release 2.99_06
@@ -71,3 +99,126 @@
    Release 2.99_01
 
    Baseline of XS implementation
+
+
+
+1999-11-05   Gisle Aas <gisle@aas.no>
+
+   Release 2.25
+
+   Allow ":" in attribute names as a workaround for Microsoft Excel
+   2000 which generates such files.
+
+   Make depreciate warning if netscape_buggy_comment() method is
+   used.  The method to use in strict_comment().
+
+   Avoid duplication of parse_file() method in HTML::HeadParser.
+
+
+
+1999-10-29   Gisle Aas <gisle@aas.no>
+
+   Release 2.24
+
+   $p->parse_file() will not close a handle passed to it any more.
+   If passed a filename that can't be opened it will return undef
+   instead of raising an exception, and strings like "*STDIN" are not
+   treated as globs any more.
+
+   HTML::LinkExtor knowns about background attribute of <tables>.
+   Patch by Clinton Wong <clintdw@netcom.com>
+
+   HTML::TokeParser will parse large inline strings much faster now.
+   The string holding the document must not be changed during parsing.
+
+
+
+1999-06-09   Gisle Aas <gisle@aas.no>
+
+   Release 2.23
+
+   Documentation updates.
+
+
+
+1998-12-18   Gisle Aas <aas@sn.no>
+
+   Release 2.22
+
+   Protect HTML::HeadParser from evil $SIG{__DIE__} hooks.
+
+
+
+1998-11-13   Gisle Aas <aas@sn.no>
+
+   Release 2.21
+
+   HTML::TokeParser can now parse strings directly and does the
+   right thing if you pass it a GLOB.  Based on patch by
+   Sami Itkonen <si@iki.fi>.
+
+   HTML::Parser now allow space before and after "--" in Netscape
+   comments.  Patch by Peter Orbaek <poe@daimi.au.dk>.
+
+
+
+1998-07-08   Gisle Aas <aas@sn.no>
+
+   Release 2.20
+
+   Added HTML::TokeParser.  Check it out!
+
+
+
+1998-07-07   Gisle Aas <aas@sn.no>
+
+   Release 2.19
+
+   Don't end a text chunk with space when we try to avoid breaking up
+   words.
+
+
+
+1998-06-22   Gisle Aas <aas@sn.no>
+
+   Release 2.18
+
+   HTML::HeadParser->parse_file will now stop parsing when the
+   <body> starts as it should.
+
+   HTML::LinkExtor more easily subclassable by introducing the
+   $self->_found_link method.
+
+
+
+1998-04-28   Gisle Aas <aas@sn.no>
+
+   Release 2.17
+
+   Never split words (a sequence of non-space) between two invocations
+   of $self->text.  This is just a simplification of the code that tried
+   not to break entities.
+   
+   HTML::Parser->parse_file now use smaller chunks as already
+   suggested by the HTML::Parser documentation.
+
+
+
+1998-04-02   Gisle Aas <aas@sn.no>
+
+   Release 2.16
+   
+   The HTML::Parser could some times break hex entites (like &#xFFFF;)
+   in the middle.
+
+   Removed remaining forced dependencies on libwww-perl modules.  It
+   means that all tests should now pass, even if libwww-perl was not
+   installed previously.
+
+   More tests.
+
+
+
+1998-04-01   Gisle Aas <aas@sn.no>
+
+   Release 2.14, HTML::* modules unbundled from libwww-perl-5.22.
