@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 2.38 1999/11/22 15:32:42 gisle Exp $
+/* $Id: Parser.xs,v 2.43 1999/11/26 15:23:54 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -9,11 +9,14 @@
 /* TODO:
  *   - write test scritps
  *   - write documentation
+ *   - callback parameter spec
+ *   - pic attribute (">" or "?>" are defaults)
  *   - count chars, line numbers
  *   - utf8 mode (entities expand to utf8 chars)
  *   - option that make start tag attrs be returned as a hash
  *   - return partial text from literal/cdata mode
  *   - accum flags (filter out what enters @accum)
+ *   - option to avoid attribute value decoding
  *
  * PLAIN BUGS:
  *   - unbroken_text does not handle cdata sections.
@@ -920,7 +923,7 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* self)
     while (s < end && isHNAME_CHAR(*s))
       s++;
     /* first word available */
-    av_push(tokens, newSVpv(beg+2, s - beg));
+    av_push(tokens, newSVpv(beg+2, s - beg - 2));
 
     while (s < end && isHSPACE(*s)) {
       s++;
@@ -1622,7 +1625,16 @@ accum(pstate,...)
 	PSTATE* pstate
     CODE:
         RETVAL = pstate->accum ? newRV_inc((SV*)pstate->accum)
-	                       : &PL_sv_undef;
+#if !(PATCHLEVEL == 4 && SUBVERSION == 5)
+			       : &PL_sv_undef;
+#else
+         /* For perl5.004_05 returning PL_sv_undef will terminate
+          * the program with the "Modification of a read-only value attempted"
+          * message if its reference count happen to be incremented.
+          * Returning a copy is then better.
+          */
+	                       : newSVsv(&PL_sv_undef);
+#endif
         if (items > 1) {
 	    SV* aref = ST(1);
             AV* av = (AV*)SvRV(aref);
