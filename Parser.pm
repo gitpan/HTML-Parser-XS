@@ -9,7 +9,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = 2.99_95;  # $Date: 1999/12/09 19:31:33 $
+$VERSION = 2.99_96;  # $Date: 1999/12/13 11:45:49 $
 
 require HTML::Entities;
 
@@ -415,7 +415,7 @@ is left unchanged since last update.
 The return value from $p->handle is the old callback routine or a
 reference to the accumulator array.
 
-Any return values from the handler callback routine/method are always
+Return values from handler callback routines/methods are always
 ignored.  A handler callback can request parsing to be aborted by
 invoking the $p->eof method.  A handler callback is not allowed to
 invoke $p->parse() or $p->parse_file().
@@ -424,18 +424,29 @@ Examples:
 
     $p->handler(start =>  "start", 'self, attr, attrseq, text' );
 
-These cause the "start" method of object $p to be called for 'start' events.
+This causes the "start" method of object $p to be called for 'start' events.
 The callback signature is $p->start(\%attr, \@attr_seq, $text).
 
     $p->handler(start =>  \&start, 'attr, attrseq, text' );
 
-These cause subroutine start() to be called for 'start' events.
+This causes subroutine start() to be called for 'start' events.
 The callback signature is start(\%attr, \@attr_seq, $text).
 
     $p->handler(start =>  \@accum, '"S", attr, attrseq, text' );
 
-These cause 'start' event information to be saved in @accum.
+This causes 'start' event information to be saved in @accum.
 The array elements will be ['S', \%attr, \@attr_seq, $text].
+
+   $p->handler(start => "");
+
+This causes 'start' events to be ignored.  It also supresses
+invokations of any default handler for these events.  It is equivalent
+to $p->handler(start => sub {}), but is more efficient.
+
+   $p->handler(start => undef);
+
+This causes no handler to be assosiated with start events any more.
+If there is a default handler it will be invoked.
 
 =back
 
@@ -535,8 +546,8 @@ This passes undef except for C<start> events.
 Unless C<xml_mode> is enabled, the attribute names are forced to
 lower case.
 
-General entities are decoded in the attribute values and any matching quotes
-wrapping the attribute values are removed.
+General entities are decoded in the attribute values and
+one layer of matching quotes enclosing the attribute values are removed.
 
 =item C<attrseq>
 
@@ -605,8 +616,8 @@ until at least one handler requests this value.
 
 =item C<"...">
 
-A literal string enclosed in single or double quotes is passed as
-written.
+A literal string of 0 to 255 chracters enclosed
+in single (') or double (") quotes is passed as entered.
 
 =item C<undef>
 
@@ -718,8 +729,8 @@ Setup of these handlers can also be requested with the "api_version =>
 =head1 SUBCLASSING
 
 The C<HTML::Parser> class is subclassable.  Parser objects are plain
-hashes and C<HTML::Parser> only reserve hash keys with the "_hparser"
-prefix.
+hashes and C<HTML::Parser> reserves only hash keys that start with
+"_hparser".
 
 =head1 EXAMPLES
 
@@ -729,7 +740,7 @@ does nothing and a default handler that will print out anything else:
 
   use HTML::Parser;
   HTML::Parser->new(default_h => [sub { print shift }, 'text'],
-                    comment_h => [sub { }, ''],
+                    comment_h => [""],
                    )->parse_file(shift || die) || die $!;
 
 The next example prints out the text that is inside the <title>
@@ -775,7 +786,7 @@ and odd "--" markers.
 Once $p->boolean_attribute_value has been set, there is no way to
 restore the default behaviour.
 
-There is currently no way to get the quote character into an literal
+There is currently no way to get both quote characters into an literal
 argspec.
 
 Empty tags, e.g. "<>" and "</>", are not recognized.  SGML allows them
