@@ -9,7 +9,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = 2.99_92;  # $Date: 1999/12/05 22:04:18 $
+$VERSION = 2.99_93;  # $Date: 1999/12/07 01:05:08 $
 
 require HTML::Entities;
 
@@ -152,8 +152,8 @@ HTML::Parser - HTML tokenizer
 
 This is the new XS based HTML::Parser.  It should be completely
 backwards compatible with HTML::Parser version 2.2x, but has many new
-features.  This is currently an beta release.  The interface to the
-new features should now be fairly stable.
+features.  This is currently an beta release.  The interface should be
+fairly stable now.
 
 =head1 DESCRIPTION
 
@@ -189,7 +189,8 @@ any options and don't want to fall back to v2 compatible mode.
 
 Examples:
 
-   $p = HTML::Parser->new(text_h => [ sub {...}, "dtext" ]);
+   $p = HTML::Parser->new(api_version => 3,
+                          text_h => [ sub {...}, "dtext" ]);
 
 This creates a new parser object with a text event handler subroutine
 that receives the original text with general entities decoded.
@@ -274,13 +275,13 @@ The official behaviour is enabled by enabling this attribute.  If
 enabled, it will cause the tag above to be reported as text
 since "LIST]" is not a legal attribute name.
 
-=item $p->bool_attr_value( $val )
+=item $p->boolean_attribute_value( $val )
 
 This method sets the value reported for boolean attributes inside
 HTML start tags.  By default, the name of the attribute is also used as
 its value.
 
-Once $p->bool_attr_value has been set,
+Once $p->boolean_attribute_value has been set,
 there is no way to restore the default behaviour.
 
 
@@ -295,7 +296,7 @@ Empty element tags look like start tags, but end with the character
 sequence "/>".  When recognized by HTML::Parser they cause an
 artificial end event in addition to the start event.  The
 C<text> for this generated end event will be empty
-and the offset value in the tokenpos array will be invalid even though
+and the tokenpos array will be undefined even though
 the only element in the token array will have the correct tag name.
 
 XML processing instructions are terminated by "?>" instead of a simple
@@ -416,7 +417,7 @@ The first number is the offset of the start of the token in the original text
 C<text> and the second number is the length of the token.
 
 This passes undef if there are no tokens in the event (e.g., C<text>)
-and for artifical C<end> events -triggered by empty start tags
+and for artifical C<end> events triggered by empty start tags
 
 =item token0
 
@@ -449,7 +450,7 @@ quotes around the attribute values are removed.
 =item attrseq
 
 Attrseq causes a reference to an array of attribute names to be
-passed.  This can be useful if you want to walk the C<attr>-hash in
+passed.  This can be useful if you want to walk the C<attr> hash in
 the original sequnce.
 
 This passes undef except for C<start> events.
@@ -477,7 +478,7 @@ if the event inside a CDATA section
 or was between literal start and end tags
 (C<script>, C<style>, C<xmp>, and C<plaintext>).
 
-When the flag is FALSE for a text event, the you should normally
+When the flag is FALSE for a text event, then you should normally
 either use C<dtext> or decode the entities yourself before the text is
 processed further.
 
@@ -620,6 +621,13 @@ Strip out comments:
 [XXX I want this to be an HTML::Parser cookbook.  Also show how we
 simplify the HTML recipes found in the "Perl Cookbook" with the new
 features provided.]
+
+=head1 BUGS
+
+HTML::Parser will leave <plaintext> mode when it sees </plaintext>
+
+<style> and <script> sections does not end with the first "</", but
+need the complete corresponding end tag.
 
 =head1 SEE ALSO
 

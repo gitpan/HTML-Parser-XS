@@ -5,6 +5,7 @@ Makefile.PL
 Parser.pm
 Parser.xs
 TODO
+eg/hrefsub
 hints/solaris.pl
 hparser.h
 hparser.c
@@ -17,7 +18,7 @@ mkhctype
 mkpfunc
 tokenpos.h
 typemap
-t/attrspec.t
+t/argspec.t
 t/cases.t
 t/default.t
 t/entities.t
