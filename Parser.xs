@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 2.11 1999/11/09 15:53:24 gisle Exp $
+/* $Id: Parser.xs,v 2.17 1999/11/10 13:17:03 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -7,7 +7,6 @@
  */
 
 /* TODO:
- *   - call entities_decode directly for text and attribute values
  *   - direct method calls
  *   - accum flags (filter out what enters @accum)
  *   - return partial text from literal mode
@@ -34,15 +33,20 @@ extern "C" {
 #endif
 
 #include "patchlevel.h"
+
 #if PATCHLEVEL <= 4 /* perl5.004 */
 
 #ifndef PL_sv_undef
    #define PL_sv_undef sv_undef
    #define PL_sv_yes   sv_yes
+#endif
+
+#ifndef PL_hexdigit
    #define PL_hexdigit hexdigit
 #endif
 
-/* The newSVpvn function was introduced in perl5.005 */
+#if (PATCHLEVEL == 4 && SUBVERSION <= 4)
+/* The newSVpvn function was introduced in perl5.004_05 */
 static SV *
 newSVpvn(char *s, STRLEN len)
 {
@@ -50,8 +54,9 @@ newSVpvn(char *s, STRLEN len)
     sv_setpvn(sv,s,len);
     return sv;
 }
-
 #endif
+
+#endif /* perl5.004 */
 
 
 /* This is used to classify "letters" that can make up an HTML identifier
@@ -79,6 +84,7 @@ struct p_state {
   int decode_text_entities;
   int keep_case;
   int xml_mode;
+  int v2_compat;
   int pass_cbdata;
 
   SV* bool_attr_val;
@@ -90,6 +96,7 @@ struct p_state {
   SV* decl_cb;
   SV* com_cb;
   SV* pi_cb;
+  SV* default_cb;
 };
 typedef struct p_state PSTATE;
 
@@ -211,6 +218,32 @@ decode_entities(SV* sv, HV* entity2char)
 }
 
 static void
+html_default(PSTATE* p_state, char* beg, char *end, SV* cbdata)
+{	
+  SV *cb = p_state->default_cb;
+  if (beg == end)
+    return;
+
+  if (cb) {
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    if (p_state->pass_cbdata)
+      XPUSHs(cbdata);
+    XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
+    
+    PUTBACK;
+
+    perl_call_sv(cb, G_DISCARD);
+
+    FREETMPS;
+    LEAVE;
+    
+  }
+}
+
+static void
 html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
 {
   AV *accum = p_state->accum;
@@ -221,8 +254,10 @@ html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
   if (beg == end)
     return;
 
-  if (!accum && !cb)
+  if (!accum && !cb) {
+    html_default(p_state, beg, end, cbdata);
     return;
+  }
 
   text = newSVpv(beg, end - beg);
   if (!cdata && p_state->decode_text_entities) {
@@ -236,7 +271,7 @@ html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
     av_push(av, text);
     if (cdata)
       av_push(av, newSVsv(&PL_sv_yes));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
     return;
   }
 
@@ -249,7 +284,6 @@ html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
       XPUSHs(cbdata);
     XPUSHs(sv_2mortal(text));
     XPUSHs(boolSV(cdata));
-    
     PUTBACK;
 
     perl_call_sv(cb, G_DISCARD);
@@ -279,7 +313,7 @@ html_end(PSTATE* p_state,
     av_push(av, newSVpv("E", 1));
     av_push(av, tag);
     av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
     return;
   }
 
@@ -303,7 +337,10 @@ html_end(PSTATE* p_state,
 
     FREETMPS;
     LEAVE;
+    return;
   }
+
+  html_default(p_state, beg, end, cbdata);
 }
 
 
@@ -318,6 +355,27 @@ html_start(PSTATE* p_state,
   AV *accum = p_state->accum;
   SV *cb = p_state->start_cb;
 
+  HV *attr;
+  AV *attr_seq;
+
+  if ((accum || cb) && p_state->v2_compat) {
+    /* need to construct an attr hash and an attr_seq array */
+    int i;
+    int len = av_len(tokens);
+    attr = newHV();
+    attr_seq = newAV();
+    for (i = 0; i <= len; i += 2) {
+      SV** svp1 = av_fetch(tokens, i,   0);
+      SV** svp2 = av_fetch(tokens, i+1, 0);
+      if (svp1) {
+	av_push(attr_seq, SvREFCNT_inc(*svp1));
+	if (svp2)
+	  if (!hv_store_ent(attr, *svp1, SvREFCNT_inc(*svp2), 0))
+	    SvREFCNT_dec(*svp2);
+      }
+    }
+  }
+
   if (accum) {
     AV* av = newAV();
     SV* tag = newSVpv(tag_beg, tag_end - tag_beg);
@@ -326,9 +384,15 @@ html_start(PSTATE* p_state,
     
     av_push(av, newSVpv("S", 1));
     av_push(av, tag);
-    av_push(av, SvREFCNT_inc((SV*)tokens));
+    if (p_state->v2_compat) {
+      av_push(av, newRV_noinc((SV*)attr));
+      av_push(av, newRV_noinc((SV*)attr_seq));
+    }
+    else {
+      av_push(av, newRV_inc((SV*)tokens));
+    }
     av_push(av, newSVpv(beg, end - beg));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
   }
   else if (cb) {
     SV *sv;
@@ -342,7 +406,13 @@ html_start(PSTATE* p_state,
     if (!p_state->keep_case && !p_state->xml_mode)
       sv_lower(sv);
     XPUSHs(sv);
-    XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
+    if (p_state->v2_compat) {
+      XPUSHs(sv_2mortal(newRV_noinc((SV*)attr)));
+      XPUSHs(sv_2mortal(newRV_noinc((SV*)attr_seq)));
+    }
+    else {
+      XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
+    }
     XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
     PUTBACK;
 
@@ -351,15 +421,21 @@ html_start(PSTATE* p_state,
     FREETMPS;
     LEAVE;
   }
-
-  if (empty_tag) {
-    html_end(p_state, tag_beg, tag_end, tag_beg, tag_beg, cbdata);
+  else {
+    html_default(p_state, beg, end, cbdata);
+    return;
   }
+
+  if (empty_tag)
+    html_end(p_state, tag_beg, tag_end, tag_beg, tag_beg, cbdata);
 }
 
 
 static void
-html_process(PSTATE* p_state, char*beg, char *end, SV* cbdata)
+html_process(PSTATE* p_state,
+	     char *pi_beg, char *pi_end,
+	     char *beg, char *end,
+	     SV* cbdata)
 {
   AV *accum;
   SV *cb;
@@ -369,7 +445,7 @@ html_process(PSTATE* p_state, char*beg, char *end, SV* cbdata)
     AV* av = newAV();
     av_push(av, newSVpv("PI", 2));
     av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
     return;
   }
 
@@ -381,6 +457,7 @@ html_process(PSTATE* p_state, char*beg, char *end, SV* cbdata)
     PUSHMARK(SP);
     if (p_state->pass_cbdata)
       XPUSHs(cbdata);
+    XPUSHs(sv_2mortal(newSVpvn(pi_beg, pi_end - pi_beg)));
     XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
     PUTBACK;
 
@@ -388,7 +465,10 @@ html_process(PSTATE* p_state, char*beg, char *end, SV* cbdata)
 
     FREETMPS;
     LEAVE;
+    return;
   }
+
+  html_default(p_state, beg, end, cbdata);
 }
 
 
@@ -403,7 +483,7 @@ html_comment(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     AV* av = newAV();
     av_push(av, newSVpv("C", 1));
     av_push(av, newSVpvn(beg, end - beg));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
     return;
   }
 
@@ -436,9 +516,10 @@ html_decl(PSTATE* p_state, AV* tokens, char *beg, char *end, SV* cbdata)
   if (accum) {
     AV* av = newAV();
     av_push(av, newSVpv("D", 1));
-    av_push(av, SvREFCNT_inc((SV*)tokens));
+    if (!p_state->v2_compat)
+      av_push(av, newRV_inc((SV*)tokens));
     av_push(av, newSVpv(beg, end - beg));
-    av_push(accum, (SV*)av);
+    av_push(accum, newRV_noinc((SV*)av));
     return;
   }
 
@@ -450,7 +531,8 @@ html_decl(PSTATE* p_state, AV* tokens, char *beg, char *end, SV* cbdata)
     PUSHMARK(SP);
     if (p_state->pass_cbdata)
       XPUSHs(cbdata);
-    XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
+    if (!p_state->v2_compat)
+      XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
     XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
     PUTBACK;
 
@@ -458,7 +540,115 @@ html_decl(PSTATE* p_state, AV* tokens, char *beg, char *end, SV* cbdata)
 
     FREETMPS;
     LEAVE;
+    return;
   }
+
+  html_default(p_state, beg-2, end+1, cbdata);
+}
+
+
+
+static char*
+html_parse_comment(PSTATE* p_state, char *beg, char *end, SV* cbdata)
+{
+  char *s = beg;
+
+  if (p_state->strict_comment) {
+    AV* av = newAV();  /* used to collect comments until we seen them all */
+    char *start_com = s;  /* also used to signal inside/outside */
+
+    while (1) {
+      /* try to locate "--" */
+    FIND_DASH_DASH:
+      /* printf("find_dash_dash: [%s]\n", s); */
+      while (s < end && *s != '-' && *s != '>')
+	s++;
+
+      if (s == end) {
+	SvREFCNT_dec(av);
+	return beg;
+      }
+
+      if (*s == '>') {
+	s++;
+	if (start_com)
+	  goto FIND_DASH_DASH;
+	
+	/* we are done recognizing all comments, make callbacks */
+	if (!p_state->accum && !p_state->com_cb)
+	    html_default(p_state, beg-4, s, cbdata);
+	else {
+	  int i;
+	  int len = av_len(av);
+	  for (i = 0; i <= len; i++) {
+	    SV** svp = av_fetch(av, i, 0);
+	    if (svp) {
+	      STRLEN len;
+	      char *s = SvPV(*svp, len);
+	      html_comment(p_state, s, s+len, cbdata);
+	    }
+	  }
+	}
+
+	SvREFCNT_dec(av);
+	return s;
+      }
+
+      s++;
+      if (s == end) {
+	SvREFCNT_dec(av);
+	return beg;
+      }
+
+      if (*s == '-') {
+	/* two dashes in a row seen */
+	s++;
+	/* do something */
+	if (start_com) {
+	  av_push(av, newSVpvn(start_com, s - start_com - 2));
+	  start_com = 0;
+	}
+	else {
+	  start_com = s;
+	}
+      }
+    }
+  }
+
+  else { /* non-strict comment */
+    char *end_com;
+    /* try to locate /--\s*>/ which signals end-of-comment */
+  LOCATE_END:
+    while (s < end && *s != '-')
+      s++;
+    end_com = s;
+    if (s < end) {
+      s++;
+      if (s < end && *s == '-') {
+	s++;
+	while (s < end && isSPACE(*s))
+	  s++;
+	if (s < end && *s == '>') {
+	  s++;
+	  /* yup */
+	  if (!p_state->accum && !p_state->com_cb)
+	    html_default(p_state, beg-4, s, cbdata);
+	  else
+	    html_comment(p_state, beg, end_com, cbdata);
+	  return s;
+	}
+      }
+      if (s < end) {
+	s = end_com + 2;
+	goto LOCATE_END;
+      }
+    }
+    
+    if (s == end)
+      return beg;
+  }
+
+  return 0;
 }
 
 
@@ -468,7 +658,23 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 {
   char *s = beg;
 
-  assert(end - beg >= 1);
+  if (*s == '-') {
+    /* comment? */
+
+    char *tmp;
+    s++;
+    if (s == end)
+      return beg;
+
+    if (*s != '-')
+      return 0;  /* nope, illegal */
+
+    /* yes, two dashes seen */
+    s++;
+
+    tmp = html_parse_comment(p_state, s, end, cbdata);
+    return (tmp == s) ? beg : tmp;
+  }
 
   if (isALPHA(*s)) {
     AV* tokens = newAV();
@@ -554,106 +760,6 @@ html_parse_decl(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     SvREFCNT_dec(tokens);
     return beg;
 
-  } else if (*s == '-') {
-    s++;
-    /* comment? */
-    if (s == end)
-      return beg;
-
-    if (*s == '-') {
-      s++;
-      /* yes, two dashes seen; it is really a comment */
-
-      if (p_state->strict_comment) {
-	AV* av = newAV();  /* used to collect comments until we seen them all */
-	char *start_com = s;  /* also used to signal inside/outside */
-
-	while (1) {
-	  /* try to locate "--" */
-	FIND_DASH_DASH:
-	  /* printf("find_dash_dash: [%s]\n", s); */
-	  while (s < end && *s != '-' && *s != '>')
-	    s++;
-
-	  if (s == end) {
-	    SvREFCNT_dec(av);
-	    return beg;
-	  }
-
-	  if (*s == '>') {
-	    s++;
-	    if (start_com)
-	      goto FIND_DASH_DASH;
-
-	    /* we are done recognizing all comments, make callbacks */
-	    {
-	      int i;
-	      int len = av_len(av);
-	      for (i = 0; i <= len; i++) {
-		SV** svp = av_fetch(av, i, 0);
-		if (svp) {
-		  STRLEN len;
-		  char *s = SvPV(*svp, len);
-		  html_comment(p_state, s, s+len, cbdata);
-		}
-	      }
-	    }
-
-	    SvREFCNT_dec(av);
-	    return s;
-	  }
-
-	  s++;
-	  if (s == end) {
-	    SvREFCNT_dec(av);
-	    return beg;
-	  }
-
-	  if (*s == '-') {
-	    /* two dashes in a row seen */
-	    s++;
-	    /* do something */
-	    if (start_com) {
-	      av_push(av, newSVpvn(start_com, s - start_com - 2));
-	      start_com = 0;
-	    }
-	    else {
-	      start_com = s;
-	    }
-	  }
-	}
-      }
-      else /* non-strict comment */
-      {
-	char *end_com;
-	/* try to locate /--\s*>/ which signals end-of-comment */
-      LOCATE_END:
-	while (s < end && *s != '-')
-	  s++;
-	end_com = s;
-	if (s < end) {
-	  s++;
-	  if (s < end && *s == '-') {
-	    s++;
-	    while (s < end && isSPACE(*s))
-	      s++;
-	    if (s < end && *s == '>') {
-	      s++;
-	      /* yup */
-	      html_comment(p_state, beg+2, end_com, cbdata);
-	      return s;
-	    }
-	  }
-	  if (s < end) {
-	    s = end_com + 2;
-	    goto LOCATE_END;
-	  }
-	}
-	
-	if (s == end)
-	  return beg;
-      }
-    }
   }
   return 0;
 }
@@ -1008,7 +1114,7 @@ html_parse(PSTATE* p_state,
 	}
 
 	/* a complete processing instruction seen */
-	html_process(p_state, t+2, pi_end, cbdata);
+	html_process(p_state, t+2, pi_end, t, s, cbdata);
 	t = s;
       }
       else {
@@ -1103,6 +1209,7 @@ DESTROY(pstate)
 	SvREFCNT_dec(pstate->decl_cb);
 	SvREFCNT_dec(pstate->com_cb);
 	SvREFCNT_dec(pstate->pi_cb);
+	SvREFCNT_dec(pstate->default_cb);
 	Safefree(pstate);
 
 
@@ -1124,7 +1231,8 @@ strict_comment(pstate,...)
 	HTML::Parser::decode_text_entities = 2
         HTML::Parser::keep_case = 3
         HTML::Parser::xml_mode = 4
-        HTML::Parser::pass_cbdata = 5
+	HTML::Parser::v2_compat = 5
+        HTML::Parser::pass_cbdata = 6
     PREINIT:
 	int *attr;
     CODE:
@@ -1133,7 +1241,8 @@ strict_comment(pstate,...)
 	case 2: attr = &pstate->decode_text_entities; break;
 	case 3: attr = &pstate->keep_case;            break;
 	case 4: attr = &pstate->xml_mode;             break;
-	case 5: attr = &pstate->pass_cbdata;          break;
+	case 5: attr = &pstate->v2_compat;            break;
+	case 6: attr = &pstate->pass_cbdata;          break;
 	default:
 	    croak("Unknown boolean attribute (%d)", ix);
         }
@@ -1202,6 +1311,8 @@ callback(pstate, name_sv, cb)
 		svp = &pstate->com_cb;
 	    if (strEQ(name, "process"))
 		svp = &pstate->pi_cb;
+	    if (strEQ(name, "default"))
+		svp = &pstate->default_cb;
 	    break;
 	case 11:
 	    if (strEQ(name, "declaration"))
@@ -1214,7 +1325,7 @@ callback(pstate, name_sv, cb)
 	    *svp = SvREFCNT_inc(cb);
 	}
 	else
-	    croak("Can't set %s callback", name);
+	    croak("Can't access %s callback", name);
 
 
 MODULE = HTML::Parser		PACKAGE = HTML::Entities

@@ -8,7 +8,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = '2.99_07';  # $Date: 1999/11/08 15:04:49 $
+$VERSION = '2.99_08';  # $Date: 1999/11/10 11:59:16 $
 
 require HTML::Entities;
 
@@ -22,41 +22,43 @@ sub new
     my $self = bless {}, $class;
     _alloc_pstate($self);
     if (@_) {
-	while (@_) {
-	    my $attr = shift;
-	    my $callback = shift;
-	    $self->callback($attr, $callback);
+	my %cfg = @_;
+
+	if (my $h = delete $cfg{handlers}) {
+	    $h = {@$h} if ref($h) eq "ARRAY";
+	    while (my($event, $cb) = each %$h) {
+		$self->callback($event => $cb);
+	    }
+	}
+
+	# In the end we try to assume plain attribute or callback
+	for (keys %cfg) {
+	    eval { $self->callback($_ => $cfg{$_}) };
+	    if ($@) {
+		if (my $m = $self->can($_)) {
+		    &$m($self, $cfg{$_});
+		}
+		else {
+		    warn "Unknown configuration key $_" if $^W;
+		}
+	    }
 	}
     }
     else {
-	_set_up_method_callbacks($self);
+	# Set up method callbacks for compatibility with HTML-Parser-2.xx
+	$self->pass_cbdata(1);  # get back $self as first argument
+	$self->v2_compat(1);    # fix start parameters
+
+	$self->callback(text        => sub { shift->text(@_)});
+	$self->callback(end         => sub { shift->end(@_)});
+	$self->callback(comment     => sub { shift->comment(@_)});
+	$self->callback(declaration => sub { shift->declaration(@_)});
+	$self->callback(process     => sub { shift->process(@_)});
+	$self->callback(start       => sub { shift->start(@_)});
     }
     $self;
 }
 
-sub _set_up_method_callbacks
-{
-    my $self = shift;
-
-    $self->pass_cbdata(1);
-
-    $self->callback(text        => sub { shift->text(@_)});
-    $self->callback(end         => sub { shift->end(@_)});
-    $self->callback(comment     => sub { shift->comment(@_)});
-    $self->callback(declaration => sub { shift->declaration(reverse @_)});
-    $self->callback(process     => sub { shift->process(@_)});
-    $self->callback(start =>
-		   sub {
-		       my($obj, $tag, $attr, $orig) = @_;
-		       my(%attr, @seq);
-		       while (@$attr) {
-			   my $key = shift @$attr;
-			   $attr{$key} = shift @$attr;
-			   push(@seq, $key);
-		       }
-		       $obj->start($tag, \%attr, \@seq, $orig);
-		   });
-}
 
 sub eof
 {
@@ -72,6 +74,7 @@ sub parse_file
         # Assume $file is a filename
         local(*F);
         open(F, $file) || return undef;
+	binmode(F);  # should we? good for byte counts
         $opened++;
         $file = *F;
     }
@@ -97,8 +100,10 @@ sub netscape_buggy_comment  # legacy
 }
 
 
+# set up method stubs
 sub text { }
 *declaration = \&text;
+*process     = \&text;
 *comment     = \&text;
 *start       = \&text;
 *end         = \&text;
