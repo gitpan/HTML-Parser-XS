@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 1.24 1999/11/05 22:16:14 gisle Exp $
+/* $Id: Parser.xs,v 1.29 1999/11/08 13:12:16 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -7,20 +7,17 @@
  */
 
 /* TODO:
+ *   - call entities_decode directly for text and attribute values
  *   - direct method calls
- *   - accum flags
- *   - specify which value boolean attributes takes
- *   - embed entity encode/decode
+ *   - accum flags (filter out what enters @accum)
  *   - return partial text from literal mode
- *   - <plaintext> should not end with </plaintext>
- *   - XML mode
- *        - processing instructions ends with "?>" instead of ">"
- *        - start tags might end with "/" which should mark them
- *          as empty
- *        - unicode characters in names
- *        - allow ":" and "_" as first char of names
  *   - marked sections?
- *   - unicode support
+ *   - unicode support (whatever that means)
+ *
+ * MINOR "BUGS":
+ *   - no way to clear "bool_attr_val" which gives the name of
+ *     the attribute as value.  Perhaps not really a problem.
+ *   - <plaintext> should not end with </plaintext>
  */
 
 #ifdef __cplusplus
@@ -41,6 +38,8 @@ extern "C" {
  *
  *  <A HREF="..." ADD_DATE="940656492" LAST_VISIT="941139558" LAST_MODIFIED="940656487">
  *  <div id="TSOH499L_24029" align=center x:publishsource="Excel">
+ *
+ *  HTML 4.0.1 now allows this.
  */
 
 #define isHALPHA(c) (isALPHA(c) || (c) == '_' || (c) == ':')
@@ -54,7 +53,9 @@ struct p_state {
   int strict_comment;
   int keep_case;
   int pass_cbdata;
+  int xml_mode;
 
+  SV* bool_attr_val;
   AV* accum;
 
   SV* text_cb;
@@ -91,6 +92,95 @@ sv_lower(SV* sv)
    return sv;
 }
 
+static SV*
+decode_entities(SV* sv, HV* entity2char)
+{
+  STRLEN len;
+  char *s = SvPV_force(sv, len);
+  char *t = s;
+  char *end = s + len;
+  char *ent_start;
+
+  char *repl;
+  STRLEN repl_len;
+  char buf[1];
+  
+
+  while (s < end) {
+    assert(t <= s);
+
+    if ((*t++ = *s++) != '&')
+      continue;
+
+    ent_start = s;
+    repl = 0;
+
+    if (*s == '#') {
+      int num = 0;
+      /* currently this code is limited to numeric references with values
+       * below 256.  Doing more need Unicode support.
+       */
+
+      s++;
+      if (*s == 'x' || *s == 'X') {
+	char *tmp;
+	s++;
+	while (*s) {
+	  char *tmp = strchr(PL_hexdigit, *s);
+	  if (!tmp)
+	    break;
+	  s++;
+	  if (num < 256) {
+	    num = num << 4 | ((tmp - PL_hexdigit) & 15);
+	  }
+	}
+      }
+      else {
+	while (isDIGIT(*s)) {
+	  if (num < 256)
+	    num = num*10 + (*s - '0');
+	  s++;
+	}
+      }
+      if (num && num < 256) {
+	buf[0] = num;
+	repl = buf;
+	repl_len = 1;
+      }
+    }
+    else {
+      char *ent_name = s;
+      while (isALNUM(*s))
+	s++;
+      if (ent_name != s && entity2char) {
+	/* XXX lookup ent_name */
+	SV** svp = hv_fetch(entity2char, ent_name, s - ent_name, 0);
+	if (svp)
+	  repl = SvPV(*svp, repl_len);
+      }
+    }
+
+    if (repl) {
+      if (*s == ';')
+	s++;
+      t--;  /* '&' already copied, undo it */
+      if (t + repl_len > s)
+	croak("Growing string not supported yet");
+      while (repl_len--)
+	*t++ = *repl++;
+    }
+    else {
+      while (ent_start < s)
+	*t++ = *ent_start++;
+    }
+  }
+
+  if (t != s) {
+    *t = '\0';
+    SvCUR_set(sv, t - SvPVX(sv));
+  }
+  return sv;
+}
 
 static void
 html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
@@ -107,7 +197,7 @@ html_text(PSTATE* p_state, char* beg, char *end, int cdata, SV* cbdata)
     av_push(av, newSVpv("T", 1));
     av_push(av, newSVpv(beg, end - beg));
     if (cdata)
-      av_push(av, &PL_sv_yes);
+      av_push(av, newSVsv(&PL_sv_yes));
     av_push(accum, (SV*)av);
     return;
   }
@@ -185,6 +275,7 @@ static void
 html_start(PSTATE* p_state,
 	   char *tag_beg, char *tag_end,
 	   AV* tokens,
+	   int empty_tag,
 	   char *beg, char *end,
 	   SV* cbdata)
 {
@@ -202,6 +293,8 @@ html_start(PSTATE* p_state,
     av_push(av, tag);
     av_push(av, (SV*)tokens);
     SvREFCNT_inc(tokens);
+    if (p_state->xml_mode)
+      av_push(av, newSVsv(boolSV(empty_tag)));
     av_push(av, newSVpv(beg, end - beg));
     av_push(accum, (SV*)av);
     return;
@@ -221,6 +314,8 @@ html_start(PSTATE* p_state,
       sv_lower(sv);
     XPUSHs(sv);
     XPUSHs(sv_2mortal(newRV_inc((SV*)tokens)));
+    if (p_state->xml_mode)
+      XPUSHs(boolSV(empty_tag));
     XPUSHs(sv_2mortal(newSVpvn(beg, end - beg)));
     PUTBACK;
 
@@ -241,7 +336,7 @@ html_process(PSTATE* p_state, char*beg, char *end, SV* cbdata)
   accum = p_state->accum;
   if (accum) {
     AV* av = newAV();
-    av_push(av, newSVpv("P", 1));
+    av_push(av, newSVpv("PI", 2));
     av_push(av, newSVpvn(beg, end - beg));
     av_push(accum, (SV*)av);
     return;
@@ -541,9 +636,10 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
   char *s = beg;
   char *tag_end;
   AV* tokens = 0;
-  SV* sv;
+  SV* attr;
+  int empty_tag = 0;  /* XML feature */
 
-  assert(beg[0] == '<' && isALPHA(beg[1]) && end - beg > 2);
+  assert(beg[0] == '<' && isHALPHA(beg[1]) && end - beg > 2);
   s += 2;
 
   while (s < end && isHALNUM(*s))
@@ -556,7 +652,7 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 
   tokens = newAV();
 
-  while (isALPHA(*s)) {
+  while (isHALPHA(*s)) {
     /* attribute */
     char *attr_beg = s;
     s++;
@@ -565,10 +661,10 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
     if (s == end)
       goto PREMATURE;
 
-    sv = newSVpv(attr_beg, s - attr_beg);
+    attr = newSVpv(attr_beg, s - attr_beg);
     if (!p_state->keep_case)
-      sv_lower(sv);
-    av_push(tokens, sv);
+      sv_lower(attr);
+    av_push(tokens, attr);
 
     while (s < end && isSPACE(*s))
       s++;
@@ -599,8 +695,11 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
       }
       else {
 	char *word_start = s;
-	while (s < end && !isSPACE(*s) && *s != '>')
+	while (s < end && !isSPACE(*s) && *s != '>') {
+	  if (p_state->xml_mode && *s == '/')
+	    break;
 	  s++;
+	}
 	if (s == end)
 	  goto PREMATURE;
 	av_push(tokens, newSVpv(word_start, s - word_start));
@@ -612,14 +711,24 @@ html_parse_start(PSTATE* p_state, char *beg, char *end, SV* cbdata)
 	goto PREMATURE;
     }
     else {
-      av_push(tokens, &PL_sv_yes);  /* XXX configurable? */
+      SV* sv = p_state->bool_attr_val;
+      if (!sv)
+	sv = attr;
+      av_push(tokens, newSVsv(sv));
     }
+  }
+
+  if (p_state->xml_mode && *s == '/') {
+    s++;
+    if (s == end)
+      goto PREMATURE;
+    empty_tag = 1;
   }
 
   if (*s == '>') {
     s++;
     /* done */
-    html_start(p_state, beg+1, tag_end, tokens, beg, s, cbdata);
+    html_start(p_state, beg+1, tag_end, tokens, empty_tag, beg, s, cbdata);
     SvREFCNT_dec(tokens);
 
     if (1) {
@@ -798,7 +907,7 @@ html_parse(PSTATE* p_state,
     /* next char is known to be '<' */
     s++;
 
-    if (isALPHA(*s)) {
+    if (isHALPHA(*s)) {
       /* start tag */
       char *new_pos = html_parse_start(p_state, t, end, cbdata);
       if (new_pos == t) {
@@ -811,7 +920,7 @@ html_parse(PSTATE* p_state,
     else if (*s == '/') {
       /* end tag */
       s++;
-      if (isALPHA(*s)) {
+      if (isHALPHA(*s)) {
 	char *tag_start = s;
 	char *tag_end;
 	s++;
@@ -850,13 +959,24 @@ html_parse(PSTATE* p_state,
     }
     else if (*s == '?') {
       /* processing instruction */
+      char *pi_end;
       s++;
+    FIND_PI_END:
       while (s < end && *s != '>')
 	s++;
       if (*s == '>') {
+	pi_end = s;
 	s++;
+
+	if (p_state->xml_mode) {
+	  /* XML processing instructions are ended by "?>" */
+	  if (s - t < 4 || s[-2] != '?')
+	    goto FIND_PI_END;
+	  pi_end = s - 2;
+	}
+
 	/* a complete processing instruction seen */
-	html_process(p_state, t+2, s-1, cbdata);
+	html_process(p_state, t+2, pi_end, cbdata);
 	t = s;
       }
       else {
@@ -943,6 +1063,7 @@ DESTROY(pstate)
 	PSTATE* pstate
     CODE:
 	SvREFCNT_dec(pstate->buf);
+        SvREFCNT_dec(pstate->bool_attr_val);
         SvREFCNT_dec(pstate->accum);
 	SvREFCNT_dec(pstate->text_cb);
 	SvREFCNT_dec(pstate->start_cb);
@@ -990,6 +1111,29 @@ keep_case(pstate,...)
 	RETVAL = pstate->keep_case;
 	if (items > 1)
 	    pstate->keep_case = SvTRUE(ST(1));
+    OUTPUT:
+	RETVAL
+
+int
+xml_mode(pstate,...)
+	PSTATE* pstate
+    CODE:
+	RETVAL = pstate->xml_mode;
+	if (items > 1)
+	    pstate->xml_mode = SvTRUE(ST(1));
+    OUTPUT:
+	RETVAL
+
+SV*
+bool_attr_value(pstate,...)
+        PSTATE* pstate
+    CODE:
+	RETVAL = pstate->bool_attr_val ? newSVsv(pstate->bool_attr_val)
+				       : &PL_sv_undef;
+	if (items > 1) {
+	    SvREFCNT_dec(pstate->bool_attr_val);
+	    pstate->bool_attr_val = SvREFCNT_inc(ST(1));
+        }
     OUTPUT:
 	RETVAL
 
@@ -1052,4 +1196,27 @@ callback(pstate, name_sv, cb)
 	}
 	else
 	    croak("Can't set %s callback", name);
+
+
+MODULE = HTML::Parser		PACKAGE = HTML::Entities
+
+void
+decode_entities(...)
+    PREINIT:
+	HV* entity2char = perl_get_hv("HTML::Entities::entity2char", 0);
+        int i;
+    PPCODE:
+	if (GIMME_V == G_SCALAR && items > 1)
+            items = 1;
+	for (i = 0; i < items; i++) {
+	    if (GIMME_V != G_VOID)
+	        ST(i) = sv_2mortal(newSVsv(ST(i)));
+	    else if (SvREADONLY(ST(i)))
+		croak("Can't inline decode readonly string");
+	    decode_entities(ST(i), entity2char);
+	}
+        XSRETURN(items);
+
+
+MODULE = HTML::Parser		PACKAGE = HTML::Parser
 
