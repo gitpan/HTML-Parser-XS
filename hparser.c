@@ -1,4 +1,4 @@
-/* $Id: hparser.c,v 2.23 1999/12/08 17:25:59 gisle Exp $
+/* $Id: hparser.c,v 2.27 1999/12/09 19:07:33 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -389,16 +389,19 @@ argspec_compile(SV* src)
     else if (*s == '"' || *s == '\'') {
       char *string_beg = s;
       s++;
-      while (s < end && *s != *string_beg)
+      while (s < end && *s != *string_beg && *s != '\\')
 	s++;
       if (*s == *string_beg) {
 	/* literal */
 	int len = s - string_beg - 1;
 	if (len > 255)
-	  croak("Can't have literal strings longer than 255 chars in argspec");
+	  croak("Literal string is longer than 255 chars in argspec");
 	sv_catpvf(argspec, "%c%c", ARG_LITERAL, len);
 	sv_catpvn(argspec, string_beg+1, len);
 	s++;
+      }
+      else if (*s == '\\') {
+	croak("Backslash reserved for literal string in argspec");
       }
       else {
 	croak("Unterminated literal string in argspec");
@@ -1019,8 +1022,8 @@ parse(PSTATE* p_state,
   char *s, *t, *beg, *end, *new_pos;
   STRLEN len;
 
-  if (!chunk || !SvOK(chunk)) {
-    /* EOF */
+  if (!chunk) {
+    /* flush */
     if (p_state->buf && SvOK(p_state->buf)) {
       /* flush it */
       STRLEN len;
@@ -1049,7 +1052,7 @@ parse(PSTATE* p_state,
   t = beg;
   end = s + len;
 
-  while (1) {
+  while (!p_state->eof) {
     /*
      * At the start of this loop we will always be ready for eating text
      * or a new tag.  We will never be inside some tag.  The 't' points
@@ -1181,7 +1184,7 @@ parse(PSTATE* p_state,
     /* next char is known to be '<' and pointed to by 't' as well as 's' */
     s++;
 
-    if ( (new_pos = parsefunc[*s](p_state, t, end, t - beg, self))) {
+    if ( (new_pos = parsefunc[(unsigned char)*s](p_state, t, end, t - beg, self))) {
       if (new_pos == t) {
 	/* no progress, need more data to know what it is */
 	s = t;
@@ -1200,7 +1203,7 @@ parse(PSTATE* p_state,
 
   p_state->chunk_offset += (s - beg);
 
-  if (s == end) {
+  if (s == end || p_state->eof) {
     if (p_state->buf) {
       SvOK_off(p_state->buf);
     }

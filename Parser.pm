@@ -9,7 +9,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = 2.99_94;  # $Date: 1999/12/08 21:23:45 $
+$VERSION = 2.99_95;  # $Date: 1999/12/09 19:31:33 $
 
 require HTML::Entities;
 
@@ -74,12 +74,6 @@ sub new
 }
 
 
-sub eof
-{
-    shift->parse(undef);
-}
-
-
 sub parse_file
 {
     my($self, $file) = @_;
@@ -93,9 +87,8 @@ sub parse_file
         $file = *F;
     }
     my $chunk = '';
-    while(read($file, $chunk, 512)) {
-        $self->parse($chunk);
-	last if delete $self->{parse_file_stop};
+    while (read($file, $chunk, 512)) {
+	$self->parse($chunk) || last;
     }
     close($file) if $opened;
     $self->eof;
@@ -106,8 +99,9 @@ sub netscape_buggy_comment  # legacy
 {
     my $self = shift;
     if ($^W) {
-	warn "netscape_buggy_comment() is depreciated.  " .
-	    "Please use the strict_comment() method instead";
+	require Carp;
+	Carp::carp("netscape_buggy_comment() is depreciated.  " .
+	    "Please use the strict_comment() method instead");
     }
     my $old = !$self->strict_comment;
     $self->strict_comment(!shift) if @_;
@@ -190,18 +184,18 @@ HTML::Parser version 2 style subclassing and method callbacks:
 
 Objects of the C<HTML::Parser> class will recognize markup and
 separate it from the plain text (alias data content) in HTML
-documents.  As different kind of markup and text is recognized, the
+documents.  As different kinds of markup and text are recognized, the
 corresponding event handlers are invoked.
 
-The C<HTML::Parser> in not a generic SGML parser.  We have tried to
+C<HTML::Parser> in not a generic SGML parser.  We have tried to
 make it able to deal with the HTML that is actually "out there", and
-by default it parse as close as possible to the way the big web
+by default it parses as close as possible to the way the big web
 browsers do it, instead of strictly following one of the many HTML
 specifications from W3C.  Where there is disagreement there is often
-options that you can enable to get the official behaviour.
+an option that you can enable to get the official behaviour.
 
 The document to be parsed may be supplied in arbitrary chunks.  This
-make on-the-fly parsing as documents are received possible.
+makes on-the-fly parsing as documents are received possible.
 
 If event driven parsing does not feel right for your application, you
 might want to take a look at C<HTML::TokeParser>.  It is a
@@ -220,11 +214,11 @@ The following method is used to construct a new C<HTML::Parser> object:
 The class method new() creates a new C<HTML::Parser> object and
 returns it.  Key/value pair arguments may be provided to set up event
 handlers or set initial parser options.  The handlers and parser
-options can also be set or modified by method calls later.
+options can also be set or modified by method calls described later.
 
 If a top level key is in the form "<event>_h" (e.g., "text_h"} then it
 assigns a handler to that event, otherwise it sets a parser
-option. The event handler specification must be wrapped up in an array
+option. The event handler specification must be wrapped in an array
 reference.  Multiple handlers may also be assigned with the 'handlers
 => [%handlers]' option.  See examples below.
 
@@ -235,7 +229,7 @@ See the section on "version 2 compatibility" below for details.
 Special constructor option 'api_version => 2' can be used to
 initialize version 2 callbacks while still setting other options and
 handlers.  The 'api_version => 3' option can be used if you don't want
-to set up any options and don't want to fall back to v2 compatible
+to set any options and don't want to fall back to v2 compatible
 mode.
 
 Examples:
@@ -270,13 +264,9 @@ to the C<HTML::Parser> object:
 =item $p->parse( $string )
 
 Parse $string as the next chunk of the HTML document.  The return
-value is a reference to the parser object (i.e. $p).
-
-=item $p->eof
-
-Signals the end of the HTML document.  Calling the eof() method will
-flush any remaining buffered text.  The return value is a reference to
-the parser object.
+value is normally a reference to the parser object (i.e. $p).  If some
+of the handlers invoked aborts parsing by calling $p->eof, then
+$p->parse() will return a FALSE value.
 
 =item $p->parse_file( $file )
 
@@ -291,10 +281,22 @@ Otherwise the return value is a reference to the parser object.
 If a file handle is passed as the $file argument, then the file will
 be read until EOF, but not closed.
 
+=item $p->eof
+
+Signals the end of the HTML document.  Calling the eof() method
+outside a handler callback will flush any remaining buffered text
+(trigger the C<text> event).
+
+Calling $p->eof inside a handler will terminate parsing at that point
+and $p->parse will return a FALSE value.  This will also terminate
+parsing by $p->parse_file() at that point.
+
+The return value is a reference to the parser object.
+
 =back
 
 
-Most parser options are controlled by boolean parser attributes.
+Most parser options are controlled by boolean attributes.
 Each boolean attribute is enabled by calling the corresponding method
 with a TRUE argument and disabled with a FALSE argument.  The
 attribute value is left unchanged if no argument is given.  The return
@@ -335,7 +337,7 @@ since "LIST]" is not a legal attribute name.
 
 This method sets the value reported for boolean attributes inside HTML
 start tags.  By default, the name of the attribute is also used as its
-value.  This affect the values found in reported C<tokens> and C<attr>.
+value.  This affect the values reported for C<tokens> and C<attr>.
 
 =item $p->xml_mode( [$bool] )
 
@@ -359,8 +361,8 @@ XML processing instructions are terminated by "?>" instead of a simple
 I<Note: This option is not supported yet!>
 
 By default, blocks of text are given to the text handler as soon as
-possible (but the parser make sure to always break text on the
-boundary between whitespace and non-whitespace so for instance
+possible (but the parser makes sure to always break text at the
+boundary between whitespace and non-whitespace so single words and
 entities always can be decoded safely).  This might create breaks that
 make it hard to do transformations on the text. When this attribute is
 enabled, blocks of text are always reported in one piece.  This will
@@ -412,6 +414,11 @@ is left unchanged since last update.
 
 The return value from $p->handle is the old callback routine or a
 reference to the accumulator array.
+
+Any return values from the handler callback routine/method are always
+ignored.  A handler callback can request parsing to be aborted by
+invoking the $p->eof method.  A handler callback is not allowed to
+invoke $p->parse() or $p->parse_file().
 
 Examples:
 
@@ -492,7 +499,8 @@ the changes to the offsets.
 =item C<token0>
 
 Token0 causes the original text of the first token string to be
-passed.  This should always be the same as $tokens->[0].
+passed.  This should always be the same as $tokens->[0]
+except for artifical end tags generated by XML empty start tags.
 
 For C<declaration> events, this is the declaration type.
 
@@ -527,7 +535,7 @@ This passes undef except for C<start> events.
 Unless C<xml_mode> is enabled, the attribute names are forced to
 lower case.
 
-General entities are decoded in the attribute values and any quotes
+General entities are decoded in the attribute values and any matching quotes
 wrapping the attribute values are removed.
 
 =item C<attrseq>
@@ -554,7 +562,7 @@ was between literal start and end tags (C<script>, C<style>, C<xmp>,
 and C<plaintext>).
 
 The ISO 8859-1 character set (aka Latin1) is assumed for entity
-decoding.  (It planedd that C<HTML::Parser> will get an C<utf8> option
+decoding.  (It is planned that C<HTML::Parser> will get an C<utf8> option
 at some point that will affect the byte sequence that characters with
 code > 127 will decode into.)
 
@@ -707,25 +715,50 @@ This is equivalent to the following method calls:
 Setup of these handlers can also be requested with the "api_version =>
 2" constructor option.
 
+=head1 SUBCLASSING
+
+The C<HTML::Parser> class is subclassable.  Parser objects are plain
+hashes and C<HTML::Parser> only reserve hash keys with the "_hparser"
+prefix.
+
 =head1 EXAMPLES
 
-Strip out <font> tags:
+The first simple example shows how you might strip out comments from
+an HTML document.  We achieve this by setting up a comment handler that
+does nothing and a default handler that will print out anything else:
 
-  sub ignore_font { print pop unless shift eq "font" }
-  HTML::Parser->new(default_h => [sub { print shift }, 'text'],
-                    start_h => [\&ignore_font, 'tagname,text'],
-                    end_h => [\&ignore_font, 'tagname,text'],
-		    marked_sections => 0,
-		    )->parse_file(shift);
-
-Strip out comments:
-
+  use HTML::Parser;
   HTML::Parser->new(default_h => [sub { print shift }, 'text'],
                     comment_h => [sub { }, ''],
-                   )->parse_file(shift);
+                   )->parse_file(shift || die) || die $!;
+
+The next example prints out the text that is inside the <title>
+element of an HTML document.  Here we start by setting up a start
+handler.  When it sees the title start tag it enables a text handler
+that prints any text found and an end handler that will terminate
+parsing as soon as the title end tag is seen:
+
+  use HTML::Parser ();
+
+  sub start_handler
+  {
+    return if shift ne "title";
+    my $self = shift;
+    $self->handler(text => sub { print shift }, "dtext");
+    $self->handler(end  => sub { shift->eof if shift eq "title"; },
+		           "tagname,self");
+  }
+
+  my $p = HTML::Parser->new(api_version => 3,
+			  start_h => [\&start_handler, "tagname,self"]);
+  $p->parse_file(shift || die) || die $!;
+  print "\n";
 
 More examples are found in the "eg/" directory of the C<HTML-Parser>
-distribution.
+distribution; the program C<hrefsub> shows how you can edit all links
+found in a document; the program C<hstrip> shows how you can strip out
+certain tags/elements and/or attributes; and the program C<htext> show
+how to obtain the plain text, but not any script/style content.
 
 =head1 BUGS
 
@@ -736,7 +769,7 @@ The <style> and <script> sections do not end with the first "</", but
 need the complete corresponding end tag.
 
 When the I<strict_comment> option is enabled, we still recognize
-comments where there is something else than whitespace between even
+comments where there is something other than whitespace between even
 and odd "--" markers.
 
 Once $p->boolean_attribute_value has been set, there is no way to
@@ -745,7 +778,7 @@ restore the default behaviour.
 There is currently no way to get the quote character into an literal
 argspec.
 
-Empty tags, e.g. "<>" and "</>", are not recognized.  SGML allow them
+Empty tags, e.g. "<>" and "</>", are not recognized.  SGML allows them
 to repeat the previous start tag or close the previous start tag
 respecitvely.
 
@@ -755,6 +788,9 @@ shorthand for "<code>...</code>".
 Unclosed start or end tags, e.g. "<tt<b>...</b</tt>" are not
 recognized.
 
+=head1 DIAGNOSTICS
+
+[To be provided]
 
 =head1 SEE ALSO
 
