@@ -8,7 +8,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = '2.99_02';  # $Date: 1999/11/03 23:01:49 $
+$VERSION = '2.99_03';  # $Date: 1999/11/05 09:59:30 $
 
 require DynaLoader;
 @ISA=qw(DynaLoader);
@@ -78,6 +78,7 @@ sub parse_file
     my $chunk = '';
     while(read($file, $chunk, 512)) {
         $self->parse($chunk);
+	last if delete $self->{parse_file_stop};
     }
     close($file) if $opened;
     $self->eof;
