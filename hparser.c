@@ -1,4 +1,4 @@
-/* $Id: hparser.c,v 2.5 1999/12/04 13:10:52 gisle Exp $
+/* $Id: hparser.c,v 2.14 1999/12/05 21:50:09 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  *
@@ -36,8 +36,8 @@ literal_mode_elem[] =
  *                                   subordinate parse_*() routines after
  *                                   looking at the first char after "<"
  *     parse_decl()                - deals with declarations         <!...>
- *       parse_comment()           - deals <!-- ... -->
- *       parse_marked_section      - deals <![ ... [ ... ]]>
+ *       parse_comment()           - deals with <!-- ... -->
+ *       parse_marked_section      - deals with <![ ... [ ... ]]>
  *     parse_end()                 - deals with end tags             </...>
  *     parse_start()               - deals with start tags           <A...>
  *     parse_process()             - deals with process instructions <?...>
@@ -131,11 +131,21 @@ report_event(PSTATE* p_state,
 
     case 't':
       /* tokens arrayref */
-      {
+      if (num_tokens >= 1) {
 	AV* av = newAV();
+	SV* prev_token;
 	int i;
+	av_extend(av, num_tokens);
 	for (i = 0; i < num_tokens; i++) {
-	  av_push(av, newSVpvn(tokens[i].beg, tokens[i].end-tokens[i].beg));
+	  if (tokens[i].beg) {
+	    prev_token = newSVpvn(tokens[i].beg, tokens[i].end-tokens[i].beg);
+	    av_push(av, prev_token);
+	  }
+	  else { /* boolean */
+	    av_push(av, p_state->bool_attr_val
+		          ? newSVsv(p_state->bool_attr_val)
+		          : newSVsv(prev_token));
+	  }
 	}
 	arg = sv_2mortal(newRV_noinc((SV*)av));
       }
@@ -143,19 +153,26 @@ report_event(PSTATE* p_state,
 
     case '#':
       /* tokenpos arrayref */
-      {
+      if (num_tokens >= 1 && tokens[0].beg >= beg) {
 	AV* av = newAV();
 	int i;
+	av_extend(av, num_tokens*2);
 	for (i = 0; i < num_tokens; i++) {
-	  av_push(av, newSViv(tokens[i].beg-beg));
-	  av_push(av, newSViv(tokens[i].end-tokens[i].beg));
+	  if (tokens[i].beg) {
+	    av_push(av, newSViv(tokens[i].beg-beg));
+	    av_push(av, newSViv(tokens[i].end-tokens[i].beg));
+	  }
+	  else { /* boolean tag value */
+	    av_push(av, newSViv(0));
+	    av_push(av, newSViv(0));
+	  }
 	}
 	arg = sv_2mortal(newRV_noinc((SV*)av));
       }
       break;
 
-    case '1':
-      /* token1 */
+    case '0':
+      /* token0 */
       /* fall through */
     case 'n':
       /* tagname */
@@ -176,17 +193,22 @@ report_event(PSTATE* p_state,
 	  SV* attrname = newSVpvn(tokens[i].beg,
 				  tokens[i].end-tokens[i].beg);
 	  SV* attrval;
-	  if (p_state->bool_attr_val && tokens[i].beg == tokens[i+1].beg) {
-	    attrval = newSVsv(p_state->bool_attr_val);
-	  }
-	  else {
+
+	  if (tokens[i+1].beg) {
 	    char *beg = tokens[i+1].beg;
 	    STRLEN len = tokens[i+1].end - beg;
 	    if (*beg == '"' || *beg == '\'') {
+	      assert(len < 2 || *beg != beg[len-1]);
 	      beg++; len -= 2;
 	    }
 	    attrval = newSVpvn(beg, len);
 	    decode_entities(attrval, entity2char);
+	  }
+	  else { /* boolean */
+	    if (p_state->bool_attr_val)
+	      attrval = newSVsv(p_state->bool_attr_val);
+	    else
+	      attrval = newSVsv(attrname);
 	  }
 
 	  if (!p_state->xml_mode)
@@ -265,7 +287,7 @@ report_event(PSTATE* p_state,
       arg = &PL_sv_undef;
 
     if (array) {
-      /* MAC: have to fix mortality here or
+      /* have to fix mortality here or
 	 add mortality to XPUSHs after removing it from the switch cases */
       av_push(array, SvREFCNT_inc(arg));
     }
@@ -294,7 +316,7 @@ report_event(PSTATE* p_state,
 }
 
 
-static SV*
+EXTERN SV*
 attrspec_compile(SV* src)
 {
   SV* attrspec = newSVpvn("", 0);
@@ -308,7 +330,7 @@ attrspec_compile(SV* src)
     names = newHV();
     hv_store(names, "self", 4,          newSVpvn("s", 1), 0);
     hv_store(names, "tokens", 6,        newSVpvn("t", 1), 0);
-    hv_store(names, "token1", 6,        newSVpvn("1", 1), 0);
+    hv_store(names, "token0", 6,        newSVpvn("0", 1), 0);
     hv_store(names, "tokenpos", 8,      newSVpvn("#", 1), 0);
     hv_store(names, "tagname", 7,       newSVpvn("n", 1), 0);
     hv_store(names, "attr", 4,          newSVpvn("a", 1), 0);
@@ -821,7 +843,7 @@ parse_start(PSTATE* p_state, char *beg, char *end, STRLEN offset, SV* self)
 	goto PREMATURE;
     }
     else {
-      PUSH_TOKEN(attr_name_beg, attr_name_end); /* boolean attr value */
+      PUSH_TOKEN(0, 0); /* boolean attr value */
     }
   }
 
@@ -1044,8 +1066,7 @@ parse(PSTATE* p_state,
 	  if (*s == '>') {
 	    s++;
 	    if (t != end_text)
-	      report_event(p_state, E_TEXT, t, end_text, 0, 0,
-			   t - beg, self);
+	      report_event(p_state, E_TEXT, t, end_text, 0, 0, t - beg, self);
 	    report_event(p_state, E_END,  end_text, s, &end_token, 1,
 			 end_text - beg, self);
 	    p_state->literal_mode = 0;
@@ -1093,8 +1114,7 @@ parse(PSTATE* p_state,
 	  s++;
 	  if (*s == '>') {
 	    s++;
-	    report_event(p_state, E_TEXT, t, end_text, 0, 0,
-			 t - beg, self);
+	    report_event(p_state, E_TEXT, t, end_text, 0, 0, t - beg, self);
 	    SvREFCNT_dec(av_pop(p_state->ms_stack));
 	    marked_section_update(p_state);    
 	    t = s;

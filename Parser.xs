@@ -1,4 +1,4 @@
-/* $Id: Parser.xs,v 2.70 1999/12/04 12:45:37 gisle Exp $
+/* $Id: Parser.xs,v 2.72 1999/12/04 23:46:45 gisle Exp $
  *
  * Copyright 1999, Gisle Aas.
  * Copyright 1999, Michael A. Chase.

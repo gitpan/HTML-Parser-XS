@@ -7,17 +7,14 @@ BEFORE 3.00
   - run more leak-tests
   - update README
 
-PLAIN BUGS
-
-  - the tokenpos reported for the generated end event for
-    empty tags in xml_mode can't work.  Should tokens be empty
-    and tagname reported?
 
 ISSUES
 
+  - Should we rename 'bool_attr_value'? It is kind of inconsistent.
+    I think it should be either 'bool_attr_val' or 'boolean_attribute_value'.
   - Should we rename 'process'?     (candidates: 'pi', 'proc',...)
   - Should we rename 'cdata_flag'?  (candidates: 'is_cdata',...)
-  - Should token1 go away?
+  - Should token0 go away?
   - Should we report tokens for 'text'?  If all you want is to know
     the length of a text segment, then 'tokenpos' could be used instead
     of asking for 'text' and then applying length($text).
@@ -29,9 +26,10 @@ ISSUES
     be part of that tag and not part of the text flow. According to
     '../html4.0.1/appendix/notes.html#h-B.3.1'
 
+
 FEATURES THAT CAN WAIT
 
- - report 'linenumber'
+ - report 'line'
  - unbroken_text option
  - utf8 mode (where entities expand to utf8 chars instead of latin1 chars)
  - pic attribute (">" or "?>" are defaults)  useful where you want
@@ -40,9 +38,17 @@ FEATURES THAT CAN WAIT
  - <![%app1;[...]]> (parameter entities)
  - $p->ignore("script", "style");
 
+
+SGML FEATURES WE PROBABLY IGNORE
+ - Empty tags: <> </>  (repeat previous start tag)
+ - <foo<bar>  (same as <foo><bar>)
+ - NET tags <name/.../
+ 
+
 POSSIBLE OPTIMIZATIONS
  - none that I can think of right now
  - run the profiler
+
 
 MINOR "BUGS" (alias FEATURES):
  - no way to clear "bool_attr_val" which gives the name of
@@ -50,5 +56,3 @@ MINOR "BUGS" (alias FEATURES):
  - <plaintext> should not end with </plaintext>; can't be
    escaped.
  - <style> and <script> does not end with the first "</".
-
-

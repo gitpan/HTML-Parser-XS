@@ -9,7 +9,7 @@ package HTML::Parser;
 use strict;
 use vars qw($VERSION @ISA);
 
-$VERSION = 2.99_91;  # $Date: 1999/12/04 12:48:18 $
+$VERSION = 2.99_92;  # $Date: 1999/12/05 22:04:18 $
 
 require HTML::Entities;
 
@@ -34,7 +34,7 @@ sub new
 	# Set up method callbacks compatible with HTML-Parser-2.xx
 	$self->handler(text    => "text",    "self,text,cdata_flag");
 	$self->handler(end     => "end",     "self,tagname,text");
-	$self->handler(process => "process", "self,token1,text");
+	$self->handler(process => "process", "self,token0,text");
 	$self->handler(start   => "start",
 		                  "self,tagname,attr,attrseq,text");
 
@@ -135,6 +135,8 @@ HTML::Parser - HTML tokenizer
 
  require HTML::Parser;
  $p = HTML::Parser->new( %options );
+
+ # Parse text chunks
  $p->parse($chunk1);
  $p->parse($chunk2);
  #...
@@ -168,33 +170,42 @@ The document to be parsed may be supplied in arbitrary chunks.
 =item $p = HTML::Parser->new( %options_and_handlers )
 
 The object constructor creates a new C<HTML::Parser> object and
-returns it.  The constructor takes key/value arguments that can set up
+returns it.  Key/value pair arguments may provided to set up
 event handlers or set parser options.
 See L</PARSER OPTIONS> and L</HANDLERS>.
 
 Multiple handlers may be assigned with the 'handlers => [handlers]' option.
-If the key ends with the suffix "_h" then it sets up an event
-handler, otherwise it sets a parser option.
+If a top level key is in the form "<event>_h" (e.g., "text_h"}
+then it assigns a handler to that event, otherwise it sets a parser option.
 
 If new() is called without any arguments,
 it will create a parser that uses callback methods compatible with Version 2.
 See L</VERSION 2 COMPATIBILITY>.
 
-Special option 'api_version => 2' can be used to initialize Version 2
-callbacks while setting other options and handlers.
+Special constructor option 'api_version => 2' can be used to
+initialize Version 2 callbacks while still setting other options and
+handlers.  'api_version => 3' can be used if you don't want to set up
+any options and don't want to fall back to v2 compatible mode.
 
 Examples:
 
    $p = HTML::Parser->new(text_h => [ sub {...}, "dtext" ]);
 
-This creates a new parser object with a text handler that receives
-the original text with general entities decoded.
+This creates a new parser object with a text event handler subroutine
+that receives the original text with general entities decoded.
 
-  $p = HTML::Parser->new(handlers => { text => [sub {...}, "argspecs"],
-                                       comment => [sub {...}, "argspecs"],
+   $p = HTML::Parser->new(start_h => [ 'my_start', "self,tokens" ]);
+
+This creates a new parser object with a start event handler method
+that receives the $p and the tokens array.
+
+  $p = HTML::Parser->new(handlers => { text => [\@array, "event,text"],
+                                       comment => [\@array, "event,text"],
                                      });
 
-This creates a new parser object with handlers for text and comment events.
+This creates a new parser object that stores
+the event type and the original text in @array
+for text and comment events.
 
 =item $p->parse( $string )
 
@@ -232,7 +243,7 @@ with a TRUE argument and disabled with a FALSE argument.  The
 attribute value is left unchanged if no argument is given.  The return
 value from each method is the old attribute value.
 
-The methods that can be used to get and/or set the options are:
+Methods that can be used to get and/or set parser options are:
 
 =over
 
@@ -260,14 +271,18 @@ part of the ALT value as was clearly intended.  This is also what
 Netscape sees.
 
 The official behaviour is enabled by enabling this attribute.  If
-enabled, it will the tag above to be parsed as text
-since "LIST]" is not a legal name.
+enabled, it will cause the tag above to be reported as text
+since "LIST]" is not a legal attribute name.
 
 =item $p->bool_attr_value( $val )
 
 This method sets the value reported for boolean attributes inside
 HTML start tags.  By default, the name of the attribute is also used as
 its value.
+
+Once $p->bool_attr_value has been set,
+there is no way to restore the default behaviour.
+
 
 =item $p->xml_mode( [$bool] )
 
@@ -279,7 +294,9 @@ are reported by the C<tagname> and C<attr> argspecs.
 Empty element tags look like start tags, but end with the character
 sequence "/>".  When recognized by HTML::Parser they cause an
 artificial end event in addition to the start event.  The
-C<text> for this generated end event will be empty.
+C<text> for this generated end event will be empty
+and the offset value in the tokenpos array will be invalid even though
+the only element in the token array will have the correct tag name.
 
 XML processing instructions are terminated by "?>" instead of a simple
 ">" as is the case for HTML.
@@ -389,6 +406,8 @@ For C<end> events, this contains the original tag name.
 
 For C<process> events, this contains the process instructions.
 
+This passes C<undef> if there are no tokens in the event (e.g., C<text>).
+
 =item tokenpos
 
 Tokenpos causes a reference to an array of token positions to be passed.
@@ -396,9 +415,12 @@ For each string that appears in C<tokens>, this array contains two numbers.
 The first number is the offset of the start of the token in the original text
 C<text> and the second number is the length of the token.
 
-=item token1
+This passes undef if there are no tokens in the event (e.g., C<text>)
+and for artifical C<end> events -triggered by empty start tags
 
-Token1 causes the original text of the first token string to be passed.
+=item token0
+
+Token0 causes the original text of the first token string to be passed.
 
 For C<declaration> events, this is the declaration type.
 
@@ -408,23 +430,27 @@ This passes undef if there are no tokens in the event.
 
 =item tagname
 
-Tagname is identical to C<token1> except that
-if $p->xml_mode is disabled, the tag name is forced to lower case.
+Tagname is identical to C<token0> except that if $p->xml_mode is
+disabled, the tag name is forced to lower case.
 
 =item attr
 
-Attr causes a reference to a hash of attribute name/value pairs to be passed.
+Attr causes a reference to a hash of attribute name/value pairs to be
+passed.
 
 This passes undef except for C<start> events.
 
-If $p->xml_mode is disabled, the attribute names are forced to lower case.
+If $p->xml_mode is disabled, the attribute names are forced to lower
+case.
 
 General entities are decoded in the attribute values and
 quotes around the attribute values are removed.
 
 =item attrseq
 
-Attrseq causes a reference to an array of attribute names to be passed.
+Attrseq causes a reference to an array of attribute names to be
+passed.  This can be useful if you want to walk the C<attr>-hash in
+the original sequnce.
 
 This passes undef except for C<start> events.
 
@@ -436,13 +462,13 @@ Text causes the original event text (including delimiters) to be passed.
 
 =item dtext
 
-Dtext causes the original text (including delimiters) to be passed.
+Dtext causes the decoded text to be passed.  General entities are
+decoded unless the event was inside a CDATA section or was between
+literal start and end tags (C<script>, C<style>, C<xmp>, and
+C<plaintext>).
 
 This passes undef except for C<text> events.
 
-General entities are decoded unless the event was inside a CDATA section
-or was between literal start and end tags
-(C<script>, C<style>, C<xmp>, and C<plaintext>).
 
 =item cdata_flag
 
@@ -451,13 +477,14 @@ if the event inside a CDATA section
 or was between literal start and end tags
 (C<script>, C<style>, C<xmp>, and C<plaintext>).
 
-When the flag is FALSE for a text event, the you should either use
-C<dtext> or decode the entities yourself before the text is
+When the flag is FALSE for a text event, the you should normally
+either use C<dtext> or decode the entities yourself before the text is
 processed further.
 
 =item offset
 
-The byte position of the C<text> withing the HTML document.
+Offset causes the byte position of the start of the event to be passed.
+The first byte in the document is 0.
 
 =item event
 
@@ -465,6 +492,14 @@ Event causes the event name to be provided.
 
 The event name is one of C<text>, C<start>, C<end>, C<declaration>,
 C<comment>, C<process> or C<default>.
+
+=item line
+
+I<Note: This is not supported yet!>
+
+Line causes the line number of the start of the event to be passed.
+The first line in the document is 1.  Line counting doesn't start
+until at least one handler requests this value.
 
 =back
 
@@ -518,6 +553,10 @@ DTDs inside <!DOCTYPE ...> will confuse HTML::Parser.
 
 This event is triggered when a markup comment is recognized.
 
+Example:
+
+  <!-- This is a comment -- -- So is this -->
+
 =item process
 
 This event is triggered when a processing instructions element is recognized.
@@ -526,6 +565,11 @@ The format and content of processing instructions is
 system and application dependent.
 More information about processing instructions may be found at
 C<http://www.sgml.u-net.com/book/sgml-8.htm>.
+
+Examples:
+
+  <? HTML processing instructions >
+  <? XML processing instructions ?>
 
 =item default
 
@@ -543,7 +587,7 @@ This is equivilent to the following method calls:
 
    $p->handler(text    => "text",    "self,text,cdata_flag");
    $p->handler(end     => "end",     "self,tagname,text");
-   $p->handler(process => "process", "self,token1,text");
+   $p->handler(process => "process", "self,token0,text");
    $p->handler(start   => "start",   "self,tagname,attr,attrseq,text");
    $p->handler(comment =>
              sub {
